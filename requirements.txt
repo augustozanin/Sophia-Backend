@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+faster-whisper
+websockets
+python-multipart
+httpx
+python-dotenv
+motor
+bcrypt
+python-docx
+pypdf
+# Opcionais, só se SOPHIA_LLM_PROVIDER não for groq:
+# openai
+# anthropic
+# google-genai
