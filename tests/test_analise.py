@@ -179,7 +179,7 @@ class Mapeador(unittest.TestCase):
         self.assertEqual(a["insights"][1]["fontes"][0]["url"], "https://stj.jus.br/x")
         self.assertEqual(a["insights"][2]["fontes"][0]["data"], "2021-03-12")
         self.assertEqual(a["insights"][2]["posicaoJurisprudencial"], "em_analise")
-        self.assertEqual((a["versao"], a["id"], a["demonstracao"]), (2, "caso1-analise-2", False))
+        self.assertEqual((a["versao"], a["indice"], a["id"], a["demonstracao"]), (2, 1, "caso1-analise-2", False))
         self.assertNotIn("instrucao", a)
         self.assertEqual(len({i["id"] for i in a["insights"]}), len(a["insights"]))
 
@@ -395,8 +395,8 @@ class Rotas(unittest.TestCase):
         prompt = self.ia.prompts[-1]
         self.assertIn("demitido sem justa causa", prompt)
         self.assertNotIn("relato do cliente", prompt)
-        self.assertIn("ANÁLISE ANTERIOR", prompt)
-        self.assertIn("material novo", prompt)
+        self.assertNotIn("ANÁLISE ANTERIOR", prompt)
+        self.assertEqual(r.json()["analise"]["versao"], 2)
 
     def test_outro_usuario_e_modelo_invalido(self):
         self.assertEqual(self.c.get("/analise/c1?user_id=B").status_code, 404)
