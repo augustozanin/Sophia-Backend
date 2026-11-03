@@ -1016,13 +1016,21 @@ async def salvar_transcricao(payload: dict):
 
     agora = time.strftime("%Y-%m-%d_%H-%M-%S")
     momento = agora_iso()
-    pasta_txt = PASTA_BACK / "transcricoes"
-    os.makedirs(pasta_txt, exist_ok=True)
-    nome_arquivo_txt = str(pasta_txt / f"transcricao_{agora}.txt")
-    with open(nome_arquivo_txt, "w", encoding="utf-8") as f:
-        f.write(texto)
+    # No Vercel o disco é só leitura; o relato vale o que entra no Mongo.
+    nome_arquivo_txt = None
+    if not os.getenv("VERCEL"):
+        try:
+            pasta_txt = PASTA_BACK / "transcricoes"
+            os.makedirs(pasta_txt, exist_ok=True)
+            caminho = pasta_txt / f"transcricao_{agora}.txt"
+            caminho.write_text(texto, encoding="utf-8")
+            nome_arquivo_txt = str(caminho)
+        except OSError:
+            pass
 
-    resultado = {"arquivo_txt": nome_arquivo_txt}
+    resultado = {}
+    if nome_arquivo_txt:
+        resultado["arquivo_txt"] = nome_arquivo_txt
     entrada = _transcript(texto, momento, duracao_segundos, origem)
 
     if case_collection is not None:
