@@ -94,6 +94,7 @@ def para_analise_front(registro: Dict[str, Any], caso_id: str) -> Dict[str, Any]
     return {
         "id": f"{caso_id}-analise-{versao}",
         "casoId": caso_id,
+        "indice": max(int(versao) - 1, 0),
         "versao": versao,
         "geradaEm": registro["gerada_em"],
         "resumo": str(dados.get("resumo_caso") or ""),

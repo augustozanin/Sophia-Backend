@@ -110,12 +110,18 @@ def criar_router(obter_contexto: ObterContexto,
             return _erro("Registre o relato do caso antes de gerar a análise.", 404)
         try:
             provider = provider_do_servidor()
+            # Chat ou relato novo: refaz os cards. Com a análise anterior no prompt a IA
+            # copia o resumo velho (“faltam dados”) e a tela não muda.
+            # Arquivo novo: aí sim manda a anterior, para incorporar só o PDF.
+            tipo = (body.fonte_tipo or "").strip().lower()
+            usar_anterior = (
+                anterior
+                and not informacoes
+                and tipo == "documento"
+            )
             analise = await run_in_threadpool(
                 run_case_analysis, provider, transcricao, documentos_bloco, True,
-                # Com fatos novos do chat a análise é refeita do zero: recebendo a versão anterior,
-                # a IA tende a copiá-la e mantém teses que os fatos novos derrubaram. A versão
-                # anterior continua salva no histórico.
-                None if informacoes else (anterior["analise"] if anterior else None),
+                anterior["analise"] if usar_anterior else None,
                 informacoes or None)
         except LLMError as e:
             return _erro(str(e), 502)
@@ -130,8 +136,14 @@ def criar_router(obter_contexto: ObterContexto,
         arm, _ctx, erro = await _preparar(user_id, caso_id)
         if erro:
             return erro
-        versoes = [para_analise_front(v, caso_id) for v in await arm.listar_analises(user_id.strip(), caso_id)]
-        return {"analise": versoes[0] if versoes else None, "versoes": versoes}
+        registros = await arm.listar_analises(user_id.strip(), caso_id)
+        analises = [para_analise_front(item, caso_id) for item in reversed(registros)]
+        versoes = [para_analise_front(item, caso_id) for item in registros]
+        return {
+            "analise": analises[-1] if analises else None,
+            "analises": analises,
+            "versoes": versoes,
+        }
 
     # ------------------------------------------------------------ chat
     @router.get("/chat/{caso_id}")

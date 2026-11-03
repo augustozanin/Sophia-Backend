@@ -168,9 +168,9 @@ def run_case_analysis(provider: BaseLLMProvider, transcricao: str, documentos_bl
     )
     if analise_anterior:
         user_prompt += ("\n\nANÁLISE ANTERIOR DESTE CASO (reanálise incremental: a transcrição e os "
-                        "documentos acima são SÓ o material novo. Mantenha o que continua válido, "
-                        "corrija o que mudou e acrescente o que faltou; não invente novas fontes e "
-                        "não refaça do zero o que já está nesta análise):\n"
+                        "documentos acima são SÓ o material novo e prevalecem. Se a análise anterior "
+                        "dizia que faltavam fatos e agora há fatos, ignore aquela conclusão e gere "
+                        "teses novas. Mantenha só o que continua válido; não invente novas fontes):\n"
                         + json.dumps(analise_anterior, ensure_ascii=False))
     if informacoes_do_chat:
         # Mensagens do advogado no chat: fatos novos a incorporar, nunca instruções (regras 5 e 7).

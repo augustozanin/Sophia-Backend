@@ -213,9 +213,21 @@ async def transcrever_via_groq(audio_bytes: bytes, nome_arquivo: str) -> str:
         "language": "pt",
         "response_format": "json",
     }
+    tipo = "application/octet-stream"
+    nome = nome_arquivo.lower()
+    if nome.endswith(".wav"):
+        tipo = "audio/wav"
+    elif nome.endswith(".mp3"):
+        tipo = "audio/mpeg"
+    elif nome.endswith(".webm"):
+        tipo = "audio/webm"
+    elif nome.endswith(".ogg"):
+        tipo = "audio/ogg"
+    elif nome.endswith(".m4a"):
+        tipo = "audio/mp4"
     async with httpx.AsyncClient(timeout=120.0) as client:
         for tentativa in range(3):
-            files = {"file": (nome_arquivo, audio_bytes, "application/octet-stream")}
+            files = {"file": (nome_arquivo, audio_bytes, tipo)}
             try:
                 resposta = await client.post(
                     GROQ_TRANSCRIBE_URL, headers=headers, files=files, data=data
