@@ -6,7 +6,7 @@ modelo sem cortar no meio de uma palavra qualquer.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .document_utils import ExtractedDocument, detect_suspicious
 
@@ -56,3 +56,31 @@ def bloco_dos_documentos(documentos: List[Dict[str, Any]]) -> Tuple[str, List[Di
     bloco = "\n\n".join(d.as_untrusted_block(i + 1) for i, d in enumerate(extraidos))
     meta = [{"nome": d.filename, "sha256": d.sha256, "suspeito": d.suspicious} for d in extraidos]
     return bloco, meta
+
+
+def material_para_analise(
+    relatos: List[Dict[str, Any]],
+    documentos: List[Dict[str, Any]],
+    *,
+    ja_existe_analise: bool,
+    incluir_chat: bool,
+    fonte_tipo: Optional[str] = None,
+    fonte_id: Optional[str] = None,
+) -> Tuple[str, str, List[Dict[str, Any]]]:
+    """Primeira análise (ou atualização pelo chat): caso inteiro.
+
+    Reanálise pelo áudio: só o último relato — o JSON da análise anterior já cobre
+    o que foi visto. Reanálise por arquivo: só aquele documento.
+    """
+    if incluir_chat or not ja_existe_analise:
+        bloco, meta = bloco_dos_documentos(documentos)
+        return texto_dos_relatos(relatos), bloco, meta
+    tipo = (fonte_tipo or "").strip().lower()
+    if tipo == "documento":
+        alvo = (fonte_id or "").strip()
+        escolhidos = [d for d in documentos if str(d.get("id") or "") == alvo] if alvo else []
+        if not escolhidos and documentos:
+            escolhidos = documentos[-1:]
+        bloco, meta = bloco_dos_documentos(escolhidos)
+        return "", bloco, meta
+    return texto_dos_relatos(relatos[-1:] if relatos else []), "", []

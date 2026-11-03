@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from .analysis import run_case_analysis, run_chat_turn, run_document_draft
-from .contexto import bloco_dos_documentos, texto_dos_relatos
+from .contexto import bloco_dos_documentos, material_para_analise, texto_dos_relatos
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
 from .llm_providers import LLMError, provider_do_servidor
 from .mapeador import mensagem_front, modelo_front, para_analise_front, peca_front
@@ -45,6 +45,8 @@ class AnaliseIn(BaseModel):
     user_id: str
     # Reanálise com o que o advogado contou no chat (botão "Atualizar análise com a conversa").
     incluir_chat: bool = False
+    fonte_tipo: Optional[str] = None
+    fonte_id: Optional[str] = None
 
 
 class ChatIn(BaseModel):
@@ -91,10 +93,6 @@ def criar_router(obter_contexto: ObterContexto,
         arm, ctx, erro = await _preparar(user_id, caso_id)
         if erro:
             return erro
-        transcricao = texto_dos_relatos(ctx["relatos"])
-        documentos_bloco, documentos_meta = bloco_dos_documentos(ctx["documentos"])
-        if not transcricao and not documentos_bloco:
-            return _erro("Registre o relato do caso antes de gerar a análise.", 404)
         anterior = await arm.ultima_analise(user_id, caso_id)
         informacoes: list[str] = []
         if body.incluir_chat:
@@ -103,6 +101,13 @@ def criar_router(obter_contexto: ObterContexto,
             informacoes = [m["conteudo"] for m in mensagens if m["papel"] == "user"][-MENSAGENS_NA_REANALISE:]
             if not informacoes:
                 return _erro("Envie no chat as informações novas antes de atualizar a análise.", 400)
+        transcricao, documentos_bloco, documentos_meta = material_para_analise(
+            ctx["relatos"], ctx["documentos"],
+            ja_existe_analise=anterior is not None,
+            incluir_chat=bool(informacoes),
+            fonte_tipo=body.fonte_tipo, fonte_id=body.fonte_id)
+        if not transcricao and not documentos_bloco:
+            return _erro("Registre o relato do caso antes de gerar a análise.", 404)
         try:
             provider = provider_do_servidor()
             analise = await run_in_threadpool(
