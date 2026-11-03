@@ -271,6 +271,15 @@ class CancelarContaRequest(BaseModel):
     user_id: str
 
 
+class AceiteTermosRequest(BaseModel):
+    # user_id vem do cookie assinado, lido pela rota /api/conta/termos do Next.
+    user_id: str
+
+
+# Mude quando o texto das cláusulas mudar: quem aceitou outra versão vê os termos de novo.
+VERSAO_TERMOS = "2026-10"
+
+
 class AssinaturaRequest(BaseModel):
     # user_id vem do cookie assinado, lido pela rota /api/assinatura do Next.
     user_id: str
@@ -335,6 +344,12 @@ def usuario_publico(documento: dict) -> dict:
         # Ausente nas contas antigas: segue ativa. false = pediu cancelamento.
         "account_active": documento.get("account_active") is not False,
         "subscription": _resumo_assinatura_publico(documento.get("subscription")),
+        # Só vale o aceite da versão atual dos termos.
+        "terms_accepted_at": (
+            documento.get("terms_accepted_at")
+            if documento.get("terms_version") == VERSAO_TERMOS
+            else None
+        ),
     }
 
 
@@ -643,6 +658,37 @@ async def cancelar_conta(payload: CancelarContaRequest):
         return JSONResponse({"erro": str(exc)}, status_code=500)
 
     usuario["account_active"] = False
+    return {"usuario": usuario_publico(usuario)}
+
+
+@app.post("/conta/aceitar-termos")
+async def aceitar_termos(payload: AceiteTermosRequest):
+    """Grava na conta o aceite dos termos de uso (data e versão). Aceitar de novo não muda a data."""
+    user_id = payload.user_id.strip()
+    if not user_id:
+        return JSONResponse({"erro": "Usuário não encontrado."}, status_code=400)
+
+    usuario = await _buscar_usuario(user_id)
+    if not usuario:
+        return JSONResponse({"erro": "Usuário não encontrado."}, status_code=404)
+    if usuario.get("terms_version") == VERSAO_TERMOS and usuario.get("terms_accepted_at"):
+        return {"usuario": usuario_publico(usuario)}
+
+    agora = agora_iso()
+    campos = {"terms_accepted_at": agora, "terms_version": VERSAO_TERMOS, "updated_at": agora}
+    try:
+        if users_collection is not None:
+            await users_collection.update_one({"_id": user_id}, {"$set": campos})
+        else:
+            usuarios = _ler_users_arquivo()
+            for item in usuarios:
+                if item.get("_id") == user_id:
+                    item.update(campos)
+            _gravar_users_arquivo(usuarios)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"erro": str(exc)}, status_code=500)
+
+    usuario.update(campos)
     return {"usuario": usuario_publico(usuario)}
 
 
