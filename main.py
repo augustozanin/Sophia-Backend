@@ -1,7 +1,8 @@
 """
 Sophia — API (cadastro + transcrição).
-O modelo Whisper só é carregado na primeira transcrição, para o cadastro
-funcionar sem esperar o download/carga do modelo.
+Em produção a transcrição vai para o Whisper da Groq (GROQ_API_KEY).
+O faster-whisper local só entra se a chave não estiver configurada
+(desenvolvimento na máquina).
 """
 
 import asyncio
@@ -79,6 +80,20 @@ _whisper = None
 OVERLAP_SECONDS = 1.0
 SALVAR_AUDIO_DEBUG = False
 PASTA_DEBUG = str(PASTA_BACK / "debug_audio")
+GROQ_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+# turbo cabe no tempo da função no Vercel; SOPHIA_WHISPER_MODEL=whisper-large-v3 se quiser mais acurácia.
+GROQ_WHISPER_MODELO = os.getenv("SOPHIA_WHISPER_MODEL", "whisper-large-v3-turbo")
+GROQ_WHISPER_LIMITE = 25 * 1024 * 1024
+
+
+def chave_groq() -> str:
+    return os.getenv("GROQ_API_KEY", "").strip()
+
+
+class TranscricaoErro(Exception):
+    def __init__(self, mensagem: str, status: int = 502):
+        super().__init__(mensagem)
+        self.status = status
 
 
 def _garantir_compat_av() -> None:
@@ -182,6 +197,58 @@ def transcrever_audio_completo_sync(audio_bytes: bytes) -> str:
     return texto
 
 
+async def transcrever_via_groq(audio_bytes: bytes, nome_arquivo: str) -> str:
+    chave = chave_groq()
+    if not chave:
+        raise TranscricaoErro("GROQ_API_KEY ausente no servidor.", 503)
+    if len(audio_bytes) > GROQ_WHISPER_LIMITE:
+        raise TranscricaoErro(
+            "O áudio passou de 25 MB. Finalize a gravação em trechos menores.",
+            413,
+        )
+
+    headers = {"Authorization": f"Bearer {chave}"}
+    data = {
+        "model": GROQ_WHISPER_MODELO,
+        "language": "pt",
+        "response_format": "json",
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        for tentativa in range(3):
+            files = {"file": (nome_arquivo, audio_bytes, "application/octet-stream")}
+            try:
+                resposta = await client.post(
+                    GROQ_TRANSCRIBE_URL, headers=headers, files=files, data=data
+                )
+            except httpx.HTTPError as exc:
+                raise TranscricaoErro(f"Falha ao falar com a Groq: {exc}") from exc
+            if resposta.status_code == 429 and tentativa < 2:
+                espera = 1.5
+                try:
+                    espera = min(float(resposta.headers.get("retry-after", "")) + 0.5, 20.0)
+                except ValueError:
+                    pass
+                await asyncio.sleep(espera)
+                continue
+            if resposta.status_code != 200:
+                raise TranscricaoErro(
+                    f"Groq Whisper retornou status {resposta.status_code}: {resposta.text[:300]}"
+                )
+            return (resposta.json().get("text") or "").strip()
+    raise TranscricaoErro("A Groq atingiu o limite de uso. Tente de novo em instantes.")
+
+
+async def transcrever_audio(audio_bytes: bytes, nome_arquivo: str = "gravacao.webm") -> str:
+    if chave_groq():
+        return await transcrever_via_groq(audio_bytes, nome_arquivo)
+    if os.getenv("VERCEL"):
+        raise TranscricaoErro(
+            "Em produção a transcrição usa a Groq. Configure GROQ_API_KEY no Vercel.",
+            503,
+        )
+    return await asyncio.to_thread(transcrever_audio_completo_sync, audio_bytes)
+
+
 @app.get("/")
 async def raiz():
     return {"servico": "Sophia API", "health": "/health", "docs": "/docs"}
@@ -200,15 +267,22 @@ async def health():
     return {
         "status": "ok",
         "mongodb": mongo_status,
+        "transcricao": "groq" if chave_groq() else (
+            "indisponível (sem GROQ_API_KEY)" if os.getenv("VERCEL") else "whisper local"
+        ),
         "whisper": "pronto" if _whisper is not None else "ainda não carregado",
-        "groq": "configurada" if os.getenv("GROQ_API_KEY", "").strip() else "ausente",
+        "groq": "configurada" if chave_groq() else "ausente",
     }
 
 
 @app.post("/transcribe")
 async def transcrever_audio_completo(audio: UploadFile = File(...)):
     audio_bytes = await audio.read()
-    texto = await asyncio.to_thread(transcrever_audio_completo_sync, audio_bytes)
+    nome = audio.filename or "gravacao.webm"
+    try:
+        texto = await transcrever_audio(audio_bytes, nome)
+    except TranscricaoErro as exc:
+        return JSONResponse({"erro": str(exc)}, status_code=exc.status)
     return {"text": texto}
 
 
@@ -1184,7 +1258,10 @@ async def websocket_transcribe(websocket: WebSocket):
             if not audio_bytes:
                 continue
             try:
-                texto = await asyncio.to_thread(transcrever_bloco, audio_bytes)
+                if chave_groq():
+                    texto = await transcrever_via_groq(audio_bytes, "bloco.webm")
+                else:
+                    texto = await asyncio.to_thread(transcrever_bloco, audio_bytes)
             except Exception as exc:  # noqa: BLE001
                 await websocket.send_json(
                     {"type": "error", "message": f"Falha ao transcrever: {exc}"}
