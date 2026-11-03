@@ -56,7 +56,10 @@ class Armazenamento:
     # ------------------------------------------------------------ análises
     async def salvar_analise(self, user_id: str, caso_id: str, analise: Dict[str, Any],
                              documentos_meta: List[Dict[str, Any]], modelo: str,
-                             origem: str = "relato", mensagens_consideradas: int = 0) -> Dict[str, Any]:
+                             origem: str = "relato", mensagens_consideradas: int = 0,
+                             fonte_tipo: Optional[str] = None, fonte_id: Optional[str] = None,
+                             fonte_nome: Optional[str] = None,
+                             fontes_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         await self.garantir_indices()
         for _ in range(3):  # duas análises simultâneas disputam a mesma versão
             ultima = await self.ultima_analise(user_id, caso_id)
@@ -67,6 +70,8 @@ class Armazenamento:
                 "analise": analise, "documentos_meta": documentos_meta,
                 # "chat" = versão que incorporou as mensagens do advogado no chat.
                 "origem": origem, "mensagens_consideradas": mensagens_consideradas,
+                "fonte_tipo": fonte_tipo, "fonte_id": fonte_id, "fonte_nome": fonte_nome,
+                "fontes_ids": list(fontes_ids or []),
             }
             try:
                 await self.analises.insert_one(registro)
@@ -84,6 +89,17 @@ class Armazenamento:
         doc = await self.analises.find_one({"user_id": user_id, "caso_id": caso_id},
                                            sort=[("versao", DESCENDING)])
         return _sem_id(doc) if doc else None
+
+    @staticmethod
+    def ids_cobertos(registro: Optional[Dict[str, Any]]) -> List[str]:
+        if not registro:
+            return []
+        ids = registro.get("fontes_ids")
+        if isinstance(ids, list) and ids:
+            return [str(item) for item in ids if item]
+        if registro.get("fonte_id"):
+            return [str(registro["fonte_id"])]
+        return []
 
     # ------------------------------------------------------------ chat
     @staticmethod

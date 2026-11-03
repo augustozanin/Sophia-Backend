@@ -84,3 +84,39 @@ def material_para_analise(
         bloco, meta = bloco_dos_documentos(escolhidos)
         return "", bloco, meta
     return texto_dos_relatos(relatos[-1:] if relatos else []), "", []
+
+
+def ids_dos_documentos(documentos: List[Dict[str, Any]]) -> List[str]:
+    return [str(doc["id"]) for doc in documentos if doc.get("id")]
+
+
+def fontes_para_salvar(
+    documentos: List[Dict[str, Any]],
+    anterior: Optional[Dict[str, Any]],
+    *,
+    incluir_chat: bool,
+    fonte_tipo: Optional[str],
+    fonte_id: Optional[str],
+) -> Dict[str, Any]:
+    """Campos gravados na análise para o front saber quais PDFs já entraram nos cards."""
+    tipo = (fonte_tipo or "").strip().lower() or None
+    alvo = (fonte_id or "").strip() or None
+    docs_ids = ids_dos_documentos(documentos)
+    cobertos: List[str] = []
+    if anterior:
+        ids = anterior.get("fontes_ids")
+        if isinstance(ids, list) and ids:
+            cobertos = [str(item) for item in ids if item]
+        elif anterior.get("fonte_id"):
+            cobertos = [str(anterior["fonte_id"])]
+    if incluir_chat or not anterior:
+        return {"fonte_tipo": tipo, "fonte_id": alvo, "fonte_nome": None, "fontes_ids": docs_ids}
+    if tipo == "documento":
+        escolhido = next((doc for doc in documentos if str(doc.get("id") or "") == alvo), None) if alvo else None
+        if escolhido is None and documentos:
+            escolhido = documentos[-1]
+            alvo = str(escolhido.get("id") or "") or None
+        nome = str(escolhido.get("name") or "") or None if escolhido else None
+        ids = list(dict.fromkeys(cobertos + ([alvo] if alvo else []))) if cobertos else docs_ids
+        return {"fonte_tipo": "documento", "fonte_id": alvo, "fonte_nome": nome, "fontes_ids": ids}
+    return {"fonte_tipo": tipo or "transcricao", "fonte_id": alvo, "fonte_nome": None, "fontes_ids": cobertos}

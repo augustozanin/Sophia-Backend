@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from .analysis import run_case_analysis, run_chat_turn, run_document_draft
-from .contexto import bloco_dos_documentos, material_para_analise, texto_dos_relatos
+from .contexto import bloco_dos_documentos, fontes_para_salvar, material_para_analise, texto_dos_relatos
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
 from .llm_providers import LLMError, provider_do_servidor
 from .mapeador import mensagem_front, modelo_front, para_analise_front, peca_front
@@ -125,11 +125,23 @@ def criar_router(obter_contexto: ObterContexto,
                 informacoes or None)
         except LLMError as e:
             return _erro(str(e), 502)
+        fontes = fontes_para_salvar(
+            ctx["documentos"], anterior,
+            incluir_chat=bool(informacoes), fonte_tipo=body.fonte_tipo, fonte_id=body.fonte_id)
         registro = await arm.salvar_analise(
             user_id, caso_id, analise, documentos_meta, f"{provider.name}:{provider.model}",
-            origem="chat" if informacoes else "relato", mensagens_consideradas=len(informacoes))
+            origem="chat" if informacoes else "relato", mensagens_consideradas=len(informacoes),
+            fonte_tipo=fontes["fonte_tipo"], fonte_id=fontes["fonte_id"],
+            fonte_nome=fontes["fonte_nome"], fontes_ids=fontes["fontes_ids"])
         await marcar_analisado(user_id, caso_id, registro["versao"])
-        return {"analise": para_analise_front(registro, caso_id)}
+        registros = await arm.listar_analises(user_id, caso_id)
+        analises = [para_analise_front(item, caso_id) for item in reversed(registros)]
+        versoes = [para_analise_front(item, caso_id) for item in registros]
+        return {
+            "analise": para_analise_front(registro, caso_id),
+            "analises": analises,
+            "versoes": versoes,
+        }
 
     @router.get("/analise/{caso_id}")
     async def obter_analises(caso_id: str, user_id: str = ""):

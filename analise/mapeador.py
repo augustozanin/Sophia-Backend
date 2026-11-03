@@ -91,7 +91,7 @@ def para_analise_front(registro: Dict[str, Any], caso_id: str) -> Dict[str, Any]
         # Relevância qualitativa; nenhum percentual de êxito é exposto (contrato de API).
         novo(categoria, rotulos.get(tipo, rotulos["outro"]), n.get("descricao"), _nivel(n.get("probabilidade")))
 
-    return {
+    out = {
         "id": f"{caso_id}-analise-{versao}",
         "casoId": caso_id,
         "indice": max(int(versao) - 1, 0),
@@ -102,6 +102,16 @@ def para_analise_front(registro: Dict[str, Any], caso_id: str) -> Dict[str, Any]
         "demonstracao": False,
         "origem": "chat" if registro.get("origem") == "chat" else "relato",
     }
+    if registro.get("fonte_tipo"):
+        out["fonteTipo"] = registro["fonte_tipo"]
+    if registro.get("fonte_id"):
+        out["fonteId"] = registro["fonte_id"]
+    if registro.get("fonte_nome"):
+        out["fonteNome"] = registro["fonte_nome"]
+    ids = registro.get("fontes_ids")
+    if isinstance(ids, list) and ids:
+        out["fontesIds"] = [str(item) for item in ids if item]
+    return out
 
 
 def mensagem_front(m: Dict[str, Any]) -> Dict[str, Any]:
