@@ -1,0 +1,12 @@
+# Ambiente local e segredos: nunca vão para o Git.
+.env
+.env.*
+!env.exemplo
+venv/
+.venv/
+
+# Gerados pelo Python e pelo backend em execução.
+__pycache__/
+*.pyc
+transcricoes/
+data/
