@@ -450,5 +450,184 @@ class Rotas(unittest.TestCase):
         self.assertEqual(len(self.c.get("/pecas/modelos").json()["modelos"]), len(modelos_pecas.MODELOS))
 
 
+class _Ambiente:
+    """Troca variáveis de ambiente só durante o teste."""
+
+    def __init__(self, **valores):
+        self.valores, self.antes = valores, {}
+
+    def __enter__(self):
+        for chave, valor in self.valores.items():
+            self.antes[chave] = os.environ.pop(chave, None)
+            if valor is not None:
+                os.environ[chave] = valor
+
+    def __exit__(self, *erro):
+        for chave, valor in self.antes.items():
+            os.environ.pop(chave, None)
+            if valor is not None:
+                os.environ[chave] = valor
+
+
+class _Obj:
+    def __init__(self, **campos):
+        self.__dict__.update(campos)
+
+
+class OpenAI_(unittest.TestCase):
+    """Provedor da OpenAI com o cliente falso: sem rede e sem gastar crédito."""
+
+    def chamar(self, json_mode=False, use_web_search=True, **ambiente):
+        import sys as _sys
+        import types
+
+        from analise.llm_providers import OpenAIProvider
+
+        pedidos = []
+
+        class Respostas:
+            def create(self, **kwargs):
+                pedidos.append(kwargs)
+                uso = _Obj(input_tokens=1200, output_tokens=300,
+                           input_tokens_details=_Obj(cached_tokens=1000),
+                           output_tokens_details=_Obj(reasoning_tokens=120))
+                return _Obj(output_text='{"ok": true}', usage=uso)
+
+        falso = types.ModuleType("openai")
+        falso.OpenAI = lambda api_key: _Obj(responses=Respostas())
+        original = _sys.modules.get("openai")
+        _sys.modules["openai"] = falso
+        try:
+            variaveis = {"SOPHIA_BUSCA_WEB": None, "SOPHIA_RACIOCINIO_OPENAI": None,
+                         "SOPHIA_MODEL_OPENAI": None, **ambiente}
+            with _Ambiente(**variaveis):
+                provedor = OpenAIProvider("sk-teste")
+                texto = provedor.generate("sistema", "usuário", use_web_search=use_web_search,
+                                          json_mode=json_mode)
+        finally:
+            if original is None:
+                _sys.modules.pop("openai", None)
+            else:
+                _sys.modules["openai"] = original
+        return texto, pedidos[0], provedor
+
+    def test_analise_pede_json_e_busca_web_fica_desligada_por_padrao(self):
+        texto, pedido, _ = self.chamar(json_mode=True)
+        self.assertEqual(texto, '{"ok": true}')
+        self.assertEqual(pedido["text"], {"format": {"type": "json_object"}})
+        self.assertNotIn("tools", pedido)
+        self.assertNotIn("reasoning", pedido)
+
+    def test_busca_web_e_raciocinio_so_quando_ligados(self):
+        _, pedido, _ = self.chamar(json_mode=True, SOPHIA_BUSCA_WEB="1", SOPHIA_RACIOCINIO_OPENAI="low")
+        self.assertEqual(pedido["tools"], [{"type": "web_search_preview"}])
+        self.assertNotIn("text", pedido)  # JSON forçado não combina com ferramenta de busca
+        self.assertEqual(pedido["reasoning"], {"effort": "low"})
+
+    def test_modelo_vem_do_ambiente_e_tokens_sao_lidos(self):
+        _, pedido, provedor = self.chamar(SOPHIA_MODEL_OPENAI="gpt-6-luna")
+        self.assertEqual(pedido["model"], "gpt-6-luna")
+        uso = provedor.tirar_consumo()
+        self.assertEqual(uso, {"chamadas": 1, "entrada": 1200, "entrada_cache": 1000,
+                               "saida": 300, "raciocinio": 120})
+        self.assertEqual(provedor.tirar_consumo()["chamadas"], 0)  # a leitura zera o contador
+
+    def test_groq_tambem_informa_os_tokens(self):
+        import httpx
+
+        from analise import llm_providers
+
+        resposta = _Obj(status_code=200, text="", headers={},
+                        json=lambda: {"choices": [{"message": {"content": "ok"}}],
+                                      "usage": {"prompt_tokens": 50, "completion_tokens": 7}})
+        original = httpx.post
+        httpx.post = lambda *a, **k: resposta
+        try:
+            provedor = llm_providers.GroqProvider("gsk_x")
+            self.assertEqual(provedor.generate("s", "u"), "ok")
+        finally:
+            httpx.post = original
+        self.assertEqual(provedor.tirar_consumo()["entrada"], 50)
+
+    def test_health_mostra_modelo_sem_a_chave(self):
+        from analise.llm_providers import descricao_da_ia
+
+        with _Ambiente(SOPHIA_LLM_PROVIDER="openai", SOPHIA_MODEL_OPENAI="gpt-6-luna",
+                       OPENAI_API_KEY="sk-segredo", SOPHIA_BUSCA_WEB=None, SOPHIA_RACIOCINIO_OPENAI=None):
+            ia = descricao_da_ia()
+        self.assertEqual((ia["provedor"], ia["modelo"], ia["chave"], ia["busca_web"]),
+                         ("openai", "gpt-6-luna", "configurada", False))
+        self.assertNotIn("sk-segredo", json.dumps(ia))
+
+
+class Consumo(unittest.TestCase):
+    def setUp(self):
+        self.arm = Armazenamento(_Banco())
+        casos = {("A", "c1"): {"titulo": "Caso", "cliente": "Ana", "area": "civil", "documentos": [],
+                               "relatos": [{"texto": "relato do cliente", "criado_em": "d1"}]}}
+
+        async def obter_contexto(user_id, caso_id):
+            return casos.get((user_id, caso_id))
+
+        async def marcar(user_id, caso_id, versao):
+            return None
+
+        class Medido(Falso):
+            def generate(self, system_prompt, user_prompt, use_web_search=True, json_mode=False):
+                self._somar_uso(entrada=1000, entrada_cache=400, saida=200, raciocinio=50)
+                return super().generate(system_prompt, user_prompt, use_web_search, json_mode)
+
+        self.ia = Medido([])
+        self.antigo = router.provider_do_servidor
+        router.provider_do_servidor = lambda: self.ia
+        app = FastAPI()
+        app.include_router(router.criar_router(obter_contexto, lambda: self.arm, marcar))
+        self.c = TestClient(app)
+
+    def tearDown(self):
+        router.provider_do_servidor = self.antigo
+
+    def test_cada_chamada_grava_os_tokens_e_o_custo_sai_por_caso(self):
+        self.ia.saidas += [json.dumps(BASE), "Resposta", "Outra resposta"]
+        self.c.post("/analise/c1", json={"user_id": "A"})
+        self.c.post("/chat/c1", json={"user_id": "A", "mensagem": "Quais riscos?"})
+        self.c.post("/chat/c1", json={"user_id": "A", "mensagem": "E os prazos?"})
+
+        with _Ambiente(SOPHIA_PRECO_IA_USD="0.10,0.01,0.50"):
+            r = self.c.get("/consumo/c1?user_id=A").json()
+        self.assertEqual(r["por_tarefa"]["analise"]["chamadas"], 1)
+        self.assertEqual(r["por_tarefa"]["chat"]["chamadas"], 2)
+        self.assertEqual(r["total"], {"chamadas": 3, "entrada": 3000, "entrada_cache": 1200,
+                                      "saida": 600, "raciocinio": 150})
+        # 1.800 entrada x 0,10 + 1.200 em cache x 0,01 + 600 saída x 0,50, por milhão
+        self.assertAlmostEqual(r["custo_usd"]["total"], 0.000492)
+        self.assertEqual(self.c.get("/consumo/c1?user_id=B").status_code, 404)  # caso alheio
+
+    def test_sem_preco_configurado_mostra_so_os_tokens(self):
+        self.ia.saidas.append(json.dumps(BASE))
+        self.c.post("/analise/c1", json={"user_id": "A"})
+        with _Ambiente(SOPHIA_PRECO_IA_USD=None):
+            r = self.c.get("/consumo/c1?user_id=A").json()
+        self.assertNotIn("custo_usd", r)
+        self.assertEqual(r["total"]["entrada"], 1000)
+
+
+class RevisaoDaTranscricao(unittest.TestCase):
+    def test_com_openai_a_revisao_usa_o_mesmo_provedor(self):
+        import main
+
+        ia = Falso(["Texto revisado."])
+        original = main.provider_do_servidor
+        main.provider_do_servidor = lambda: ia
+        try:
+            with _Ambiente(SOPHIA_LLM_PROVIDER="openai"):
+                r = TestClient(main.app).post("/revisar-transcricao", json={"texto": "texto cru do whisper"})
+        finally:
+            main.provider_do_servidor = original
+        self.assertEqual(r.json(), {"texto_revisado": "Texto revisado."})
+        self.assertEqual(ia.prompts, ["texto cru do whisper"])
+        self.assertEqual(ia.chamadas, [False])  # texto livre, sem JSON
+
+
 if __name__ == "__main__":
     unittest.main()

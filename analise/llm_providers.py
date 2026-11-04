@@ -16,6 +16,15 @@ class LLMError(RuntimeError):
     """Erro de comunicação com o provedor de IA escolhido pelo usuário."""
 
 
+def busca_web_ligada() -> bool:
+    """Busca na web das IAs que a suportam. Desligada por padrão: na OpenAI é cobrada à parte."""
+    return (os.environ.get("SOPHIA_BUSCA_WEB") or "").strip().lower() in {"1", "true", "sim", "on"}
+
+
+def _consumo_vazio() -> dict:
+    return {"chamadas": 0, "entrada": 0, "entrada_cache": 0, "saida": 0, "raciocinio": 0}
+
+
 class BaseLLMProvider(ABC):
     name: str
     env_var: str
@@ -26,6 +35,20 @@ class BaseLLMProvider(ABC):
             raise LLMError("Chave de API não informada para este provedor.")
         self.api_key = api_key
         self.model = model or os.environ.get(self.env_var) or self.fallback_model
+        self.consumo = _consumo_vazio()
+
+    def _somar_uso(self, entrada=0, entrada_cache=0, saida=0, raciocinio=0) -> None:
+        """Tokens de uma chamada, informados pelo provedor. Somam até `tirar_consumo()`."""
+        self.consumo["chamadas"] += 1
+        self.consumo["entrada"] += int(entrada or 0)
+        self.consumo["entrada_cache"] += int(entrada_cache or 0)
+        self.consumo["saida"] += int(saida or 0)
+        self.consumo["raciocinio"] += int(raciocinio or 0)
+
+    def tirar_consumo(self) -> dict:
+        """Devolve os tokens gastos desde a última leitura e zera o contador."""
+        atual, self.consumo = self.consumo, _consumo_vazio()
+        return atual
 
     @abstractmethod
     def generate(self, system_prompt: str, user_prompt: str,
@@ -44,15 +67,31 @@ class OpenAIProvider(BaseLLMProvider):
         except ImportError as e:
             raise LLMError("Pacote 'openai' não instalado (pip install openai).") from e
         client = OpenAI(api_key=self.api_key)
-        tools = [{"type": "web_search_preview"}] if use_web_search else None
+        kwargs = dict(model=self.model, instructions=system_prompt, input=user_prompt)
+        if use_web_search and busca_web_ligada():
+            kwargs["tools"] = [{"type": "web_search_preview"}]
+        elif json_mode:
+            # Análise: a OpenAI garante JSON válido (o prompt de sistema já pede JSON).
+            kwargs["text"] = {"format": {"type": "json_object"}}
+        esforco = (os.environ.get("SOPHIA_RACIOCINIO_OPENAI") or "").strip().lower()
+        if esforco:
+            # Modelos de raciocínio (ex.: gpt-6-luna): none, low, medium, high...
+            kwargs["reasoning"] = {"effort": esforco}
         try:
-            resp = client.responses.create(
-                model=self.model, instructions=system_prompt,
-                input=user_prompt, tools=tools,
-            )
-            return resp.output_text
+            resp = client.responses.create(**kwargs)
         except Exception as e:  # noqa: BLE001
             raise LLMError(f"Falha ao chamar a OpenAI: {e}") from e
+        uso = getattr(resp, "usage", None)
+        if uso is not None:
+            entrada_det = getattr(uso, "input_tokens_details", None)
+            saida_det = getattr(uso, "output_tokens_details", None)
+            self._somar_uso(
+                entrada=getattr(uso, "input_tokens", 0),
+                entrada_cache=getattr(entrada_det, "cached_tokens", 0) if entrada_det else 0,
+                saida=getattr(uso, "output_tokens", 0),
+                raciocinio=getattr(saida_det, "reasoning_tokens", 0) if saida_det else 0,
+            )
+        return resp.output_text or ""
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -135,7 +174,15 @@ class GroqProvider(BaseLLMProvider):
                 raise LLMError("A IA atingiu o limite de uso por minuto. Aguarde alguns segundos e tente de novo.")
             if r.status_code != 200:
                 raise LLMError(f"Groq retornou status {r.status_code}: {r.text[:300]}")
-            return r.json()["choices"][0]["message"]["content"] or ""
+            dados = r.json()
+            uso = dados.get("usage") or {}
+            self._somar_uso(
+                entrada=uso.get("prompt_tokens", 0),
+                entrada_cache=(uso.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+                saida=uso.get("completion_tokens", 0),
+                raciocinio=(uso.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
+            )
+            return dados["choices"][0]["message"]["content"] or ""
         raise LLMError("A IA não respondeu. Tente de novo.")
 
     TENTATIVAS_LIMITE = 3
@@ -166,13 +213,33 @@ _ENV_CHAVE = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
               "google": "GOOGLE_API_KEY", "groq": "GROQ_API_KEY"}
 
 
+def nome_do_provedor() -> str:
+    return (os.environ.get("SOPHIA_LLM_PROVIDER") or "groq").strip().lower()
+
+
+def descricao_da_ia() -> dict:
+    """Provedor e modelo ativos, para o /health. Nunca inclui a chave."""
+    nome = nome_do_provedor()
+    cls = PROVIDERS.get(nome)
+    if cls is None:
+        return {"provedor": nome, "erro": "SOPHIA_LLM_PROVIDER inválido"}
+    return {
+        "provedor": nome,
+        "modelo": os.environ.get(cls.env_var) or cls.fallback_model,
+        "chave": "configurada" if (os.environ.get(_ENV_CHAVE[nome]) or "").strip() else "ausente",
+        "busca_web": busca_web_ligada(),
+        "raciocinio": (os.environ.get("SOPHIA_RACIOCINIO_OPENAI") or "padrão do modelo")
+        if nome == "openai" else None,
+    }
+
+
 def provider_do_servidor() -> BaseLLMProvider:
     """
     Provedor configurado no servidor (créditos de IA vêm da assinatura, não do usuário).
     SOPHIA_LLM_PROVIDER escolhe o provedor (padrão: groq) e a chave vem de <PROVEDOR>_API_KEY
     no .env do backend. A chave nunca passa pelo navegador.
     """
-    nome = (os.environ.get("SOPHIA_LLM_PROVIDER") or "groq").strip().lower()
+    nome = nome_do_provedor()
     if nome not in PROVIDERS:
         raise LLMError(f"SOPHIA_LLM_PROVIDER inválido: '{nome}'. Opções: {', '.join(PROVIDERS)}")
     chave = (os.environ.get(_ENV_CHAVE[nome]) or "").strip()

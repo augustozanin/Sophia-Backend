@@ -25,6 +25,7 @@ from .analysis import run_case_analysis, run_chat_turn, run_document_draft
 from .contexto import bloco_dos_documentos, fontes_para_salvar, material_para_analise, texto_dos_relatos
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
 from .llm_providers import LLMError, provider_do_servidor
+from .consumo import resumo_do_consumo
 from .mapeador import mensagem_front, modelo_front, para_analise_front, peca_front
 from .modelos_pecas import FASES, GRUPOS, MODELOS, obter_modelo
 from .storage import Armazenamento
@@ -68,6 +69,17 @@ def _resumo_do_caso(ctx: Dict[str, Any]) -> Dict[str, Any]:
     return {"titulo": ctx.get("titulo"), "cliente": ctx.get("cliente"), "area": ctx.get("area")}
 
 
+async def _registrar(arm, user_id: str, caso_id: str, tarefa: str, provider) -> None:
+    """Grava os tokens da chamada, inclusive as que falharam no meio (também são cobradas)."""
+    if provider is None:
+        return
+    try:
+        await arm.registrar_consumo(user_id, caso_id, tarefa, provider.name, provider.model,
+                                    provider.tirar_consumo())
+    except Exception:  # noqa: BLE001 — medir custo nunca pode derrubar a resposta ao usuário
+        pass
+
+
 def criar_router(obter_contexto: ObterContexto,
                  armazenamento: Callable[[], Optional[Armazenamento]],
                  marcar_analisado: MarcarAnalisado) -> APIRouter:
@@ -108,6 +120,7 @@ def criar_router(obter_contexto: ObterContexto,
             fonte_tipo=body.fonte_tipo, fonte_id=body.fonte_id)
         if not transcricao and not documentos_bloco:
             return _erro("Registre o relato do caso antes de gerar a análise.", 404)
+        provider = None
         try:
             provider = provider_do_servidor()
             # Chat ou relato novo: refaz os cards. Com a análise anterior no prompt a IA
@@ -125,6 +138,9 @@ def criar_router(obter_contexto: ObterContexto,
                 informacoes or None)
         except LLMError as e:
             return _erro(str(e), 502)
+        finally:
+            await _registrar(arm, user_id, caso_id, "atualizar_analise_chat" if informacoes else "analise",
+                             provider)
         fontes = fontes_para_salvar(
             ctx["documentos"], anterior,
             incluir_chat=bool(informacoes), fonte_tipo=body.fonte_tipo, fonte_id=body.fonte_id)
@@ -182,6 +198,7 @@ def criar_router(obter_contexto: ObterContexto,
         contexto = {"caso": _resumo_do_caso(ctx), "analise": ultima["analise"] if ultima else None,
                     "relato": relato}
         documentos_bloco, _meta = bloco_dos_documentos(ctx["documentos"])
+        provider = None
         try:
             provider = provider_do_servidor()
             resposta = await run_in_threadpool(
@@ -190,10 +207,21 @@ def criar_router(obter_contexto: ObterContexto,
                 mensagem, documentos_bloco)
         except LLMError as e:
             return _erro(str(e), 502)
+        finally:
+            await _registrar(arm, user_id, caso_id, "chat", provider)
         novas = await arm.adicionar_mensagens(user_id, caso_id, [("user", mensagem), ("assistant", resposta)])
         return {"mensagens": [mensagem_front(m) for m in novas]}
 
     # ------------------------------------------------------------ peças
+    # ------------------------------------------------------------ consumo
+    @router.get("/consumo/{caso_id}")
+    async def consumo_do_caso(caso_id: str, user_id: str = ""):
+        """Tokens gastos no caso, por tarefa, e o custo estimado (SOPHIA_PRECO_IA_USD)."""
+        arm, _ctx, erro = await _preparar(user_id, caso_id)
+        if erro:
+            return erro
+        return resumo_do_consumo(await arm.listar_consumo(user_id.strip(), caso_id))
+
     @router.get("/pecas/modelos")
     async def listar_modelos():
         return {"modelos": [modelo_front(m) for m in MODELOS], "grupos": GRUPOS, "fases": FASES}
@@ -248,11 +276,14 @@ def criar_router(obter_contexto: ObterContexto,
         instrucoes = (body.instrucoes or "").strip()[:2000] or None
         contexto = {"caso": _resumo_do_caso(ctx), "analise": ultima["analise"],
                     "relato": texto_dos_relatos(ctx["relatos"], LIMITE_RELATO_CHAT)}
+        provider = None
         try:
             provider = provider_do_servidor()
             rascunho = await run_in_threadpool(run_document_draft, provider, contexto, modelo, instrucoes)
         except LLMError as e:
             return _erro(str(e), 502)
+        finally:
+            await _registrar(arm, user_id, caso_id, "peca", provider)
         if not rascunho.strip():
             return _erro("A IA não devolveu texto para a minuta. Tente novamente.", 502)
         peca = await arm.salvar_peca(user_id, caso_id, modelo, rascunho.strip(), instrucoes, ultima["versao"])

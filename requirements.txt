@@ -9,7 +9,7 @@ motor
 bcrypt
 python-docx
 pypdf
-# Opcionais, só se SOPHIA_LLM_PROVIDER não for groq:
-# openai
+openai
+# Opcionais, só se SOPHIA_LLM_PROVIDER for anthropic ou google:
 # anthropic
 # google-genai

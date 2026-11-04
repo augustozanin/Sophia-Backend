@@ -40,6 +40,8 @@ class Armazenamento:
         self.analises = db["analises"]
         self.mensagens = db["mensagens"]
         self.pecas = db["pecas"]
+        # Tokens gastos por chamada à IA (um documento por chamada), para medir o custo por caso.
+        self.consumo = db["consumo_ia"]
         self._indices_prontos = False
 
     async def garantir_indices(self) -> None:
@@ -149,3 +151,19 @@ class Armazenamento:
             return None
         doc = await self.pecas.find_one({"_id": ObjectId(peca_id), "user_id": user_id, "caso_id": caso_id})
         return self._peca(doc) if doc else None
+
+    # ------------------------------------------------------------ consumo de IA
+    async def registrar_consumo(self, user_id: str, caso_id: str, tarefa: str, provedor: str,
+                                modelo: str, uso: Dict[str, Any]) -> None:
+        """uso: chamadas, entrada, entrada_cache, saida, raciocinio (tokens do provedor)."""
+        if not uso or not uso.get("chamadas"):
+            return
+        await self.consumo.insert_one({
+            "user_id": user_id, "caso_id": caso_id, "tarefa": tarefa,
+            "provedor": provedor, "modelo": modelo, "criado_em": agora(),
+            **{k: int(uso.get(k) or 0) for k in ("chamadas", "entrada", "entrada_cache", "saida", "raciocinio")},
+        })
+
+    async def listar_consumo(self, user_id: str, caso_id: str) -> List[Dict[str, Any]]:
+        cursor = self.consumo.find({"user_id": user_id, "caso_id": caso_id})
+        return [_sem_id(d) for d in await cursor.to_list(length=5000)]
