@@ -25,6 +25,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 
 from analise.document_utils import extract_text
+from analise.llm_providers import LLMError, descricao_da_ia, nome_do_provedor, provider_do_servidor
 from analise.router import criar_router as criar_router_analise
 from analise.storage import Armazenamento
 
@@ -284,6 +285,8 @@ async def health():
         ),
         "whisper": "pronto" if _whisper is not None else "ainda não carregado",
         "groq": "configurada" if chave_groq() else "ausente",
+        # Provedor e modelo da análise, do chat, das peças e da revisão (sem a chave).
+        "ia": descricao_da_ia(),
     }
 
 
@@ -383,6 +386,15 @@ NOME_PLANOS = {"basico": "Básico", "intermediario": "Intermediário", "pro": "P
 async def revisar_transcricao(payload: RevisarTextoRequest):
     if not payload.texto.strip():
         return {"texto_revisado": payload.texto}
+
+    if nome_do_provedor() != "groq" and not payload.groq_api_key.strip():
+        # Mesmo provedor e modelo da análise (ex.: OpenAI). A transcrição em si continua no Whisper.
+        try:
+            ia = provider_do_servidor()
+            revisado = await asyncio.to_thread(ia.generate, PROMPT_REVISAO, payload.texto, False, False)
+        except LLMError as exc:
+            return {"erro": str(exc)}
+        return {"texto_revisado": revisado.strip() or payload.texto}
 
     chave = payload.groq_api_key.strip() or os.getenv("GROQ_API_KEY", "")
     if not chave:
