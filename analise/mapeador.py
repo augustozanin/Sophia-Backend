@@ -42,7 +42,7 @@ def _fontes(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     achado = _TRIBUNAL_RE.search(fonte)
     tribunal = str(item.get("tribunal") or "").strip() or (achado.group(1) if achado else "Fonte citada")
     url = _URL_RE.search(fonte)
-    out: Dict[str, Any] = {"tribunal": tribunal, "identificador": _URL_RE.sub("", fonte).strip(" ,;()") or fonte}
+    out: Dict[str, Any] = {"tribunal": tribunal, "identificador": _URL_RE.sub("", fonte).strip(" ,;:()") or fonte}
     data = _data_iso(item.get("data"))
     if data:
         out["data"] = data
