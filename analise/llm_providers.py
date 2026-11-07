@@ -11,6 +11,8 @@ import re
 import time
 from abc import ABC, abstractmethod
 
+from .busca_web import dominios_da_busca
+
 
 class LLMError(RuntimeError):
     """Erro de comunicação com o provedor de IA escolhido pelo usuário."""
@@ -22,7 +24,14 @@ def busca_web_ligada() -> bool:
 
 
 def _consumo_vazio() -> dict:
-    return {"chamadas": 0, "entrada": 0, "entrada_cache": 0, "saida": 0, "raciocinio": 0}
+    return {"chamadas": 0, "entrada": 0, "entrada_cache": 0, "saida": 0, "raciocinio": 0, "buscas": 0}
+
+
+def _campo(obj, nome, padrao=None):
+    """Lê atributo de objeto do SDK ou chave de dict."""
+    if isinstance(obj, dict):
+        return obj.get(nome, padrao)
+    return getattr(obj, nome, padrao)
 
 
 class BaseLLMProvider(ABC):
@@ -36,14 +45,21 @@ class BaseLLMProvider(ABC):
         self.api_key = api_key
         self.model = model or os.environ.get(self.env_var) or self.fallback_model
         self.consumo = _consumo_vazio()
+        # URLs que a busca na web devolveu na última chamada (fontes consultadas e citações).
+        self.fontes_web: list = []
 
-    def _somar_uso(self, entrada=0, entrada_cache=0, saida=0, raciocinio=0) -> None:
+    def _somar_uso(self, entrada=0, entrada_cache=0, saida=0, raciocinio=0, buscas=0) -> None:
         """Tokens de uma chamada, informados pelo provedor. Somam até `tirar_consumo()`."""
         self.consumo["chamadas"] += 1
         self.consumo["entrada"] += int(entrada or 0)
         self.consumo["entrada_cache"] += int(entrada_cache or 0)
         self.consumo["saida"] += int(saida or 0)
         self.consumo["raciocinio"] += int(raciocinio or 0)
+        self.consumo["buscas"] += int(buscas or 0)
+
+    def busca_ativa(self, use_web_search: bool = True) -> bool:
+        """Se esta chamada vai pesquisar na web com a lista de sites (hoje só a OpenAI)."""
+        return False
 
     def tirar_consumo(self) -> dict:
         """Devolve os tokens gastos desde a última leitura e zera o contador."""
@@ -68,8 +84,16 @@ class OpenAIProvider(BaseLLMProvider):
             raise LLMError("Pacote 'openai' não instalado (pip install openai).") from e
         client = OpenAI(api_key=self.api_key)
         kwargs = dict(model=self.model, instructions=system_prompt, input=user_prompt)
-        if use_web_search and busca_web_ligada():
-            kwargs["tools"] = [{"type": "web_search_preview"}]
+        self.fontes_web = []
+        if self.busca_ativa(use_web_search):
+            kwargs["tools"] = [{
+                "type": "web_search",
+                # Só sites jurídicos (busca_web.DOMINIOS); subdomínios entram junto.
+                "filters": {"allowed_domains": dominios_da_busca()},
+                "user_location": {"type": "approximate", "country": "BR"},
+            }]
+            # Lista completa das páginas consultadas, para validar os links dos cards.
+            kwargs["include"] = ["web_search_call.action.sources"]
         elif json_mode:
             # Análise: a OpenAI garante JSON válido (o prompt de sistema já pede JSON).
             kwargs["text"] = {"format": {"type": "json_object"}}
@@ -90,8 +114,34 @@ class OpenAIProvider(BaseLLMProvider):
                 entrada_cache=getattr(entrada_det, "cached_tokens", 0) if entrada_det else 0,
                 saida=getattr(uso, "output_tokens", 0),
                 raciocinio=getattr(saida_det, "reasoning_tokens", 0) if saida_det else 0,
+                buscas=sum(1 for item in (_campo(resp, "output") or [])
+                           if _campo(item, "type") == "web_search_call"),
             )
+        self.fontes_web = _urls_da_resposta(resp)
         return resp.output_text or ""
+
+    def busca_ativa(self, use_web_search: bool = True) -> bool:
+        return bool(use_web_search) and busca_web_ligada()
+
+
+def _urls_da_resposta(resp) -> list:
+    """URLs das páginas consultadas pela busca e das citações (url_citation) da resposta."""
+    urls = []
+    for item in _campo(resp, "output") or []:
+        tipo = _campo(item, "type")
+        if tipo == "web_search_call":
+            acao = _campo(item, "action")
+            for fonte in _campo(acao, "sources") or []:
+                if _campo(fonte, "url"):
+                    urls.append(_campo(fonte, "url"))
+            if _campo(acao, "url"):  # open_page / find_in_page
+                urls.append(_campo(acao, "url"))
+        elif tipo == "message":
+            for parte in _campo(item, "content") or []:
+                for nota in _campo(parte, "annotations") or []:
+                    if _campo(nota, "type") == "url_citation" and _campo(nota, "url"):
+                        urls.append(_campo(nota, "url"))
+    return list(dict.fromkeys(urls))
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -228,6 +278,7 @@ def descricao_da_ia() -> dict:
         "modelo": os.environ.get(cls.env_var) or cls.fallback_model,
         "chave": "configurada" if (os.environ.get(_ENV_CHAVE[nome]) or "").strip() else "ausente",
         "busca_web": busca_web_ligada(),
+        "sites_da_busca": len(dominios_da_busca()) if nome == "openai" and busca_web_ligada() else None,
         "raciocinio": (os.environ.get("SOPHIA_RACIOCINIO_OPENAI") or "padrão do modelo")
         if nome == "openai" else None,
     }

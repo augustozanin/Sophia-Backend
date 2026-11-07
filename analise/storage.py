@@ -155,13 +155,14 @@ class Armazenamento:
     # ------------------------------------------------------------ consumo de IA
     async def registrar_consumo(self, user_id: str, caso_id: str, tarefa: str, provedor: str,
                                 modelo: str, uso: Dict[str, Any]) -> None:
-        """uso: chamadas, entrada, entrada_cache, saida, raciocinio (tokens do provedor)."""
+        """uso: chamadas, entrada, entrada_cache, saida, raciocinio e buscas (pesquisas na web)."""
         if not uso or not uso.get("chamadas"):
             return
         await self.consumo.insert_one({
             "user_id": user_id, "caso_id": caso_id, "tarefa": tarefa,
             "provedor": provedor, "modelo": modelo, "criado_em": agora(),
-            **{k: int(uso.get(k) or 0) for k in ("chamadas", "entrada", "entrada_cache", "saida", "raciocinio")},
+            **{k: int(uso.get(k) or 0)
+               for k in ("chamadas", "entrada", "entrada_cache", "saida", "raciocinio", "buscas")},
         })
 
     async def listar_consumo(self, user_id: str, caso_id: str) -> List[Dict[str, Any]]:

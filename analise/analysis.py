@@ -14,6 +14,7 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional
 
+from .busca_web import INSTRUCAO_LINKS, urls_consultadas, validar_links
 from .llm_providers import BaseLLMProvider, LLMError
 
 REQUIRED_KEYS = ["resumo_caso", "teses", "temas_stf_stj", "jurisprudencia",
@@ -183,6 +184,9 @@ def run_case_analysis(provider: BaseLLMProvider, transcricao: str, documentos_bl
             "porque o fato já aconteceu, nem pergunta que eles já respondem; acrescente o que eles "
             "exigem:\n<informacoes_do_chat>\n" + itens
             + "\n</informacoes_do_chat>")
+    if provider.busca_ativa(use_web_search):
+        user_prompt += INSTRUCAO_LINKS
+    consultadas: set = set()
     last_problems: List[str] = []
     for attempt in range(MAX_ATTEMPTS):
         prompt = user_prompt
@@ -197,6 +201,10 @@ def run_case_analysis(provider: BaseLLMProvider, transcricao: str, documentos_bl
             if attempt == MAX_ATTEMPTS - 1:
                 raise LLMError(f"{e} Resposta bruta: {raw[:500]}") from e
             continue
+        # Só ficam os links que a busca realmente devolveu (nunca um link inventado).
+        consultadas |= urls_consultadas(getattr(provider, "fontes_web", None) or [])
+        if isinstance(data, dict):
+            validar_links(data, consultadas)
         last_problems = validate_schema(data)
         if not last_problems:
             return data
