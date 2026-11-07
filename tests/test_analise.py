@@ -491,7 +491,17 @@ class OpenAI_(unittest.TestCase):
                 uso = _Obj(input_tokens=1200, output_tokens=300,
                            input_tokens_details=_Obj(cached_tokens=1000),
                            output_tokens_details=_Obj(reasoning_tokens=120))
-                return _Obj(output_text='{"ok": true}', usage=uso)
+                saida = []
+                if kwargs.get("tools"):
+                    saida = [
+                        {"type": "web_search_call", "action": {
+                            "type": "search", "sources": [{"type": "url", "url": "https://www.stj.jus.br/a"}]}},
+                        {"type": "web_search_call", "action": {"type": "open_page",
+                                                               "url": "https://stf.jus.br/b"}},
+                        {"type": "message", "content": [{"type": "output_text", "annotations": [
+                            {"type": "url_citation", "url": "https://planalto.gov.br/c?utm_source=openai"}]}]},
+                    ]
+                return _Obj(output_text='{"ok": true}', usage=uso, output=saida)
 
         falso = types.ModuleType("openai")
         falso.OpenAI = lambda api_key: _Obj(responses=Respostas())
@@ -520,7 +530,10 @@ class OpenAI_(unittest.TestCase):
 
     def test_busca_web_e_raciocinio_so_quando_ligados(self):
         _, pedido, _ = self.chamar(json_mode=True, SOPHIA_BUSCA_WEB="1", SOPHIA_RACIOCINIO_OPENAI="low")
-        self.assertEqual(pedido["tools"], [{"type": "web_search_preview"}])
+        ferramenta = pedido["tools"][0]
+        self.assertEqual(ferramenta["type"], "web_search")
+        self.assertIn("stj.jus.br", ferramenta["filters"]["allowed_domains"])
+        self.assertEqual(pedido["include"], ["web_search_call.action.sources"])
         self.assertNotIn("text", pedido)  # JSON forçado não combina com ferramenta de busca
         self.assertEqual(pedido["reasoning"], {"effort": "low"})
 
@@ -529,7 +542,7 @@ class OpenAI_(unittest.TestCase):
         self.assertEqual(pedido["model"], "gpt-6-luna")
         uso = provedor.tirar_consumo()
         self.assertEqual(uso, {"chamadas": 1, "entrada": 1200, "entrada_cache": 1000,
-                               "saida": 300, "raciocinio": 120})
+                               "saida": 300, "raciocinio": 120, "buscas": 0})
         self.assertEqual(provedor.tirar_consumo()["chamadas"], 0)  # a leitura zera o contador
 
     def test_groq_tambem_informa_os_tokens(self):
@@ -598,7 +611,7 @@ class Consumo(unittest.TestCase):
         self.assertEqual(r["por_tarefa"]["analise"]["chamadas"], 1)
         self.assertEqual(r["por_tarefa"]["chat"]["chamadas"], 2)
         self.assertEqual(r["total"], {"chamadas": 3, "entrada": 3000, "entrada_cache": 1200,
-                                      "saida": 600, "raciocinio": 150})
+                                      "saida": 600, "raciocinio": 150, "buscas": 0})
         # 1.800 entrada x 0,10 + 1.200 em cache x 0,01 + 600 saída x 0,50, por milhão
         self.assertAlmostEqual(r["custo_usd"]["total"], 0.000492)
         self.assertEqual(self.c.get("/consumo/c1?user_id=B").status_code, 404)  # caso alheio
@@ -627,6 +640,87 @@ class RevisaoDaTranscricao(unittest.TestCase):
         self.assertEqual(r.json(), {"texto_revisado": "Texto revisado."})
         self.assertEqual(ia.prompts, ["texto cru do whisper"])
         self.assertEqual(ia.chamadas, [False])  # texto livre, sem JSON
+
+
+class BuscaWeb(unittest.TestCase):
+    """Busca restrita a sites jurídicos e links dos cards só das páginas consultadas."""
+
+    def test_lista_padrao_cabe_no_limite_da_openai_e_variavel_troca(self):
+        from analise.busca_web import dominios_da_busca
+
+        with _Ambiente(SOPHIA_BUSCA_DOMINIOS=None):
+            padrao = dominios_da_busca()
+        self.assertLessEqual(len(padrao), 100)
+        for site in ("stf.jus.br", "stj.jus.br", "tjsp.jus.br", "trt24.jus.br", "trf6.jus.br",
+                     "planalto.gov.br", "gov.br", "oab.org.br", "jusbrasil.com.br"):
+            self.assertIn(site, padrao)
+        with _Ambiente(SOPHIA_BUSCA_DOMINIOS="https://STF.jus.br/, stj.jus.br stf.jus.br"):
+            self.assertEqual(dominios_da_busca(), ["stf.jus.br", "stj.jus.br"])
+
+    def test_openai_conta_pesquisas_e_guarda_urls_consultadas(self):
+        _, _, provedor = OpenAI_().chamar(json_mode=True, SOPHIA_BUSCA_WEB="1")
+        self.assertEqual(provedor.tirar_consumo()["buscas"], 2)
+        self.assertEqual(provedor.fontes_web, ["https://www.stj.jus.br/a", "https://stf.jus.br/b",
+                                               "https://planalto.gov.br/c?utm_source=openai"])
+
+    def test_so_ficam_links_que_a_busca_devolveu(self):
+        from analise.busca_web import urls_consultadas, validar_links
+
+        consultadas = urls_consultadas(["https://www.stj.jus.br/tema1007?utm_source=openai"])
+        dados = {"teses": [
+            {"fonte": "STJ, Tema 1007 ([stj.jus.br](https://stj.jus.br/tema1007/))"},
+            {"fonte": "STF, Tema 999 https://stf.jus.br/inventado"},
+            {"fonte": "https://tjsp.jus.br/so-link-inventado"},
+        ], "temas_stf_stj": [], "jurisprudencia": [{"fonte": "não verificado"}]}
+        validar_links(dados, consultadas)
+        self.assertEqual(dados["teses"][0]["fonte"], "STJ, Tema 1007 (https://stj.jus.br/tema1007/)")
+        front = mapeador._fontes(dados["teses"][0])[0]
+        self.assertEqual((front["identificador"], front["url"]), ("STJ, Tema 1007", "https://stj.jus.br/tema1007/"))
+        self.assertEqual(dados["teses"][1]["fonte"], "STF, Tema 999")
+        self.assertEqual(dados["teses"][2]["fonte"], "não verificado")
+        self.assertEqual(dados["jurisprudencia"][0]["fonte"], "não verificado")
+
+    def test_analise_pede_links_e_card_recebe_url_verificada(self):
+        class ComBusca(Falso):
+            def busca_ativa(self, use_web_search=True):
+                return use_web_search
+
+            def generate(self, system_prompt, user_prompt, use_web_search=True, json_mode=False):
+                self.fontes_web = ["https://processo.stj.jus.br/repetitivos/tema1007?utm_source=openai"]
+                return super().generate(system_prompt, user_prompt, use_web_search, json_mode)
+
+        resposta = dict(BASE, temas_stf_stj=[
+            {"titulo": "Tema 1007", "descricao": "Aposentadoria híbrida", "relevancia": "alta",
+             "fonte": "STJ, Tema 1007 https://processo.stj.jus.br/repetitivos/tema1007?utm_source=openai"},
+            {"titulo": "Tema falso", "descricao": "x", "relevancia": "baixa",
+             "fonte": "STF https://stf.jus.br/nao-consultado"}])
+        ia = ComBusca([json.dumps(resposta)])
+        dados = analysis.run_case_analysis(ia, "relato", "")
+        self.assertIn("URL exata", ia.prompts[0])
+        self.assertEqual(dados["temas_stf_stj"][0]["fonte"],
+                         "STJ, Tema 1007 https://processo.stj.jus.br/repetitivos/tema1007")
+        front = mapeador.para_analise_front({"versao": 1, "gerada_em": "d", "analise": dados}, "c1")
+        fontes = [i["fontes"] for i in front["insights"] if i["categoria"] == "tema_superior"]
+        self.assertEqual(fontes[0][0]["url"], "https://processo.stj.jus.br/repetitivos/tema1007")
+        self.assertNotIn("url", fontes[1][0])  # link não consultado foi apagado
+
+    def test_sem_busca_nenhum_link_sobrevive_e_prompt_nao_muda(self):
+        resposta = dict(BASE, teses=[{"titulo": "T", "descricao": "d", "relevancia": "alta",
+                                      "fonte": "Lei 8.213/1991 https://planalto.gov.br/inventado"}])
+        ia = Falso([json.dumps(resposta)])
+        dados = analysis.run_case_analysis(ia, "relato", "")
+        self.assertNotIn("URL exata", ia.prompts[0])
+        self.assertEqual(dados["teses"][0]["fonte"], "Lei 8.213/1991")
+
+    def test_custo_inclui_as_pesquisas(self):
+        from analise.consumo import custo_usd, precos_por_milhao
+
+        with _Ambiente(SOPHIA_PRECO_IA_USD="0.10,0.01,0.50,10"):
+            precos = precos_por_milhao()
+        # 1.000.000 de entrada x 0,10 + 3 pesquisas x 10/1000
+        self.assertAlmostEqual(custo_usd({"entrada": 1_000_000, "buscas": 3}, precos), 0.13)
+        with _Ambiente(SOPHIA_PRECO_IA_USD="0.10,0.01,0.50"):
+            self.assertEqual(precos_por_milhao()["busca_por_mil"], 0.0)
 
 
 if __name__ == "__main__":

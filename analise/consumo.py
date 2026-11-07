@@ -4,13 +4,14 @@ Resumo do consumo de IA de um caso (coleção `consumo_ia`) e custo estimado.
 Os preços não ficam no código porque mudam: SOPHIA_PRECO_IA_USD traz o preço em dólar por
 milhão de tokens no formato "entrada,entrada_cache,saida". Ex. do gpt-6-luna: "0.10,0.01,0.50".
 Tokens de raciocínio já vêm somados na saída pelos provedores e são cobrados como saída.
+Um 4º valor opcional é o preço por mil pesquisas na web (OpenAI: 10), ex.: "0.10,0.01,0.50,10".
 """
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional
 
-CAMPOS = ("chamadas", "entrada", "entrada_cache", "saida", "raciocinio")
+CAMPOS = ("chamadas", "entrada", "entrada_cache", "saida", "raciocinio", "buscas")
 
 
 def precos_por_milhao() -> Optional[Dict[str, float]]:
@@ -18,17 +19,23 @@ def precos_por_milhao() -> Optional[Dict[str, float]]:
     if not bruto:
         return None
     try:
-        entrada, cache, saida = (float(x) for x in bruto.split(","))
+        valores = [float(x) for x in bruto.split(",")]
     except ValueError:
         return None
-    return {"entrada": entrada, "entrada_cache": cache, "saida": saida}
+    if len(valores) not in (3, 4):
+        return None
+    entrada, cache, saida = valores[:3]
+    busca = valores[3] if len(valores) == 4 else 0.0
+    return {"entrada": entrada, "entrada_cache": cache, "saida": saida, "busca_por_mil": busca}
 
 
 def custo_usd(uso: Dict[str, int], precos: Dict[str, float]) -> float:
     cache = min(uso.get("entrada_cache", 0), uso.get("entrada", 0))
     sem_cache = uso.get("entrada", 0) - cache
-    return round((sem_cache * precos["entrada"] + cache * precos["entrada_cache"]
-                  + uso.get("saida", 0) * precos["saida"]) / 1_000_000, 6)
+    tokens = (sem_cache * precos["entrada"] + cache * precos["entrada_cache"]
+              + uso.get("saida", 0) * precos["saida"]) / 1_000_000
+    buscas = uso.get("buscas", 0) * precos.get("busca_por_mil", 0.0) / 1000
+    return round(tokens + buscas, 6)
 
 
 def resumo_do_consumo(registros: List[Dict[str, Any]]) -> Dict[str, Any]:
