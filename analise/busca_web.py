@@ -105,7 +105,7 @@ def _limpar_fonte(fonte: str, consultadas: Set[str]) -> str:
 
     texto = _URL_RE.sub(trocar, texto)
     texto = re.sub(r"\(\s*\)", "", texto)
-    return re.sub(r"\s{2,}", " ", texto).strip(" ,;-–—")
+    return re.sub(r"\s{2,}", " ", texto).strip(" ,;:-–—")
 
 
 def validar_links(dados: Dict[str, Any], consultadas: Set[str]) -> Dict[str, Any]:
