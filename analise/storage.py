@@ -61,7 +61,8 @@ class Armazenamento:
                              origem: str = "relato", mensagens_consideradas: int = 0,
                              fonte_tipo: Optional[str] = None, fonte_id: Optional[str] = None,
                              fonte_nome: Optional[str] = None,
-                             fontes_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+                             fontes_ids: Optional[List[str]] = None,
+                             area: Optional[str] = None) -> Dict[str, Any]:
         await self.garantir_indices()
         for _ in range(3):  # duas análises simultâneas disputam a mesma versão
             ultima = await self.ultima_analise(user_id, caso_id)
@@ -74,6 +75,8 @@ class Armazenamento:
                 "origem": origem, "mensagens_consideradas": mensagens_consideradas,
                 "fonte_tipo": fonte_tipo, "fonte_id": fonte_id, "fonte_nome": fonte_nome,
                 "fontes_ids": list(fontes_ids or []),
+                # Área cuja orientação entrou no prompt (None = prompt genérico).
+                "area": area,
             }
             try:
                 await self.analises.insert_one(registro)

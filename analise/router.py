@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from .analysis import run_case_analysis, run_chat_turn, run_document_draft
+from .areas import AREAS, area_front, normalizar_area
 from .contexto import bloco_dos_documentos, fontes_para_salvar, material_para_analise, texto_dos_relatos
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
 from .llm_providers import LLMError, provider_do_servidor
@@ -67,6 +68,11 @@ def _erro(msg: str, status: int) -> JSONResponse:
 
 def _resumo_do_caso(ctx: Dict[str, Any]) -> Dict[str, Any]:
     return {"titulo": ctx.get("titulo"), "cliente": ctx.get("cliente"), "area": ctx.get("area")}
+
+
+def _area_do_caso(ctx: Dict[str, Any]) -> Optional[str]:
+    """Área do catálogo que escolhe a orientação do prompt; None = prompt genérico."""
+    return normalizar_area(ctx.get("area"))
 
 
 async def _registrar(arm, user_id: str, caso_id: str, tarefa: str, provider) -> None:
@@ -120,6 +126,7 @@ def criar_router(obter_contexto: ObterContexto,
             fonte_tipo=body.fonte_tipo, fonte_id=body.fonte_id)
         if not transcricao and not documentos_bloco:
             return _erro("Registre o relato do caso antes de gerar a análise.", 404)
+        area = _area_do_caso(ctx)
         provider = None
         try:
             provider = provider_do_servidor()
@@ -135,7 +142,7 @@ def criar_router(obter_contexto: ObterContexto,
             analise = await run_in_threadpool(
                 run_case_analysis, provider, transcricao, documentos_bloco, True,
                 anterior["analise"] if usar_anterior else None,
-                informacoes or None)
+                informacoes or None, area)
         except LLMError as e:
             return _erro(str(e), 502)
         finally:
@@ -148,7 +155,7 @@ def criar_router(obter_contexto: ObterContexto,
             user_id, caso_id, analise, documentos_meta, f"{provider.name}:{provider.model}",
             origem="chat" if informacoes else "relato", mensagens_consideradas=len(informacoes),
             fonte_tipo=fontes["fonte_tipo"], fonte_id=fontes["fonte_id"],
-            fonte_nome=fontes["fonte_nome"], fontes_ids=fontes["fontes_ids"])
+            fonte_nome=fontes["fonte_nome"], fontes_ids=fontes["fontes_ids"], area=area)
         await marcar_analisado(user_id, caso_id, registro["versao"])
         registros = await arm.listar_analises(user_id, caso_id)
         analises = [para_analise_front(item, caso_id) for item in reversed(registros)]
@@ -204,7 +211,7 @@ def criar_router(obter_contexto: ObterContexto,
             resposta = await run_in_threadpool(
                 run_chat_turn, provider, contexto,
                 [{"role": m["papel"], "content": m["conteudo"]} for m in historico],
-                mensagem, documentos_bloco)
+                mensagem, documentos_bloco, area=_area_do_caso(ctx))
         except LLMError as e:
             return _erro(str(e), 502)
         finally:
@@ -212,7 +219,13 @@ def criar_router(obter_contexto: ObterContexto,
         novas = await arm.adicionar_mensagens(user_id, caso_id, [("user", mensagem), ("assistant", resposta)])
         return {"mensagens": [mensagem_front(m) for m in novas]}
 
-    # ------------------------------------------------------------ peças
+    # ------------------------------------------------------------ áreas
+    @router.get("/areas")
+    async def listar_areas():
+        """Áreas jurídicas aceitas em `legal_area`; cada uma tem orientação própria na IA.
+        `gruposPecas` = grupos de /pecas/modelos que fazem sentido para a área."""
+        return {"areas": [area_front(a) for a in AREAS]}
+
     # ------------------------------------------------------------ consumo
     @router.get("/consumo/{caso_id}")
     async def consumo_do_caso(caso_id: str, user_id: str = ""):
@@ -222,6 +235,7 @@ def criar_router(obter_contexto: ObterContexto,
             return erro
         return resumo_do_consumo(await arm.listar_consumo(user_id.strip(), caso_id))
 
+    # ------------------------------------------------------------ peças
     @router.get("/pecas/modelos")
     async def listar_modelos():
         return {"modelos": [modelo_front(m) for m in MODELOS], "grupos": GRUPOS, "fases": FASES}
@@ -279,7 +293,8 @@ def criar_router(obter_contexto: ObterContexto,
         provider = None
         try:
             provider = provider_do_servidor()
-            rascunho = await run_in_threadpool(run_document_draft, provider, contexto, modelo, instrucoes)
+            rascunho = await run_in_threadpool(run_document_draft, provider, contexto, modelo, instrucoes,
+                                               area=_area_do_caso(ctx))
         except LLMError as e:
             return _erro(str(e), 502)
         finally:

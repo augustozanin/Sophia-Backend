@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from analise import analysis, contexto, docx_builder, mapeador, modelos_pecas, router  # noqa: E402
+from analise import analysis, areas, contexto, docx_builder, mapeador, modelos_pecas, router  # noqa: E402
 from analise.llm_providers import BaseLLMProvider, LLMError, provider_do_servidor  # noqa: E402
 from analise.storage import Armazenamento  # noqa: E402
 
@@ -22,11 +22,12 @@ class Falso(BaseLLMProvider):
 
     def __init__(self, saidas):
         super().__init__("k")
-        self.saidas, self.chamadas, self.prompts = list(saidas), [], []
+        self.saidas, self.chamadas, self.prompts, self.sistemas = list(saidas), [], [], []
 
     def generate(self, system_prompt, user_prompt, use_web_search=True, json_mode=False):
         self.chamadas.append(json_mode)
         self.prompts.append(user_prompt)
+        self.sistemas.append(system_prompt)
         return self.saidas.pop(0)
 
 
@@ -158,6 +159,69 @@ class Catalogo(unittest.TestCase):
             self.assertIn(m["fase"], modelos_pecas.FASES, m["id"])
             self.assertTrue(m["secoes"] and m["descricao"] and m["quando_usar"], m["id"])
         self.assertIsNone(modelos_pecas.obter_modelo("nao-existe"))
+
+
+class Areas(unittest.TestCase):
+    ESPERADAS = {"civil", "familia-sucessoes", "trabalhista", "previdenciario", "consumidor", "empresarial",
+                 "tributario", "penal", "administrativo", "imobiliario", "ambiental", "digital"}
+
+    def test_catalogo_tem_as_12_areas_com_todos_os_blocos(self):
+        self.assertEqual(set(areas.AREAS_JURIDICAS), self.ESPERADAS)
+        for area in areas.AREAS:
+            self.assertTrue(set(area["grupos_pecas"]) <= set(modelos_pecas.GRUPOS), area["id"])
+            for tarefa in areas.TAREFAS:
+                texto = areas.orientacao_da_area(area["id"], tarefa)
+                self.assertIn(area["nome"].upper(), texto)
+                self.assertIn("CAUTELAS", texto)
+
+    def test_cada_tarefa_usa_so_os_seus_blocos(self):
+        analise = areas.orientacao_da_area("previdenciario", "analise")
+        chat = areas.orientacao_da_area("previdenciario", "chat")
+        minuta = areas.orientacao_da_area("previdenciario", "minuta")
+        self.assertIn("PERGUNTAS QUE COSTUMAM FALTAR", analise)
+        self.assertIn("perguntas_sugeridas", analise)
+        self.assertNotIn("ORIENTAÇÃO PARA A MINUTA", analise)
+        self.assertNotIn("PERGUNTAS QUE COSTUMAM FALTAR", chat)
+        self.assertNotIn("perguntas_sugeridas", chat)  # o chat responde em texto, não em JSON
+        self.assertIn("ORIENTAÇÃO PARA A MINUTA", minuta)
+        self.assertNotIn("O QUE EXAMINAR", minuta)
+
+    def test_orientacao_nao_traz_numero_de_tema_ou_sumula(self):
+        # Número escrito aqui seria repetido pela IA como se estivesse verificado (regra 2).
+        for area in areas.AREAS:
+            for tarefa in areas.TAREFAS:
+                texto = areas.orientacao_da_area(area["id"], tarefa)
+                self.assertIsNone(analysis._SPECIFIC_NUMBER_RE.search(texto), (area["id"], tarefa))
+
+    def test_apelidos_e_area_desconhecida(self):
+        self.assertEqual(areas.normalizar_area(" Criminal "), "penal")
+        self.assertEqual(areas.normalizar_area("familia"), "familia-sucessoes")
+        self.assertIsNone(areas.normalizar_area("astrologia"))
+        self.assertIsNone(areas.normalizar_area(None))
+        self.assertEqual(areas.orientacao_da_area(None, "analise"), "")
+
+    def test_sem_area_o_prompt_e_o_generico_de_antes(self):
+        self.assertEqual(analysis.system_prompt("analise"), analysis.SYSTEM_PROMPT)
+        self.assertEqual(analysis.system_prompt("analise", "inexistente"), analysis.SYSTEM_PROMPT)
+
+    def test_analise_chat_e_minuta_recebem_a_orientacao_da_area(self):
+        p = Falso([json.dumps(BASE), "ok", "ok"])
+        analysis.run_case_analysis(p, "relato", "", area="trabalhista")
+        analysis.run_chat_turn(p, BASE, [], "oi", area="trabalhista")
+        analysis.run_document_draft(p, BASE, modelos_pecas.obter_modelo("reclamacao-trabalhista"),
+                                    area="trabalhista")
+        for sistema in p.sistemas:
+            self.assertTrue(sistema.startswith(analysis.SYSTEM_PROMPT.rstrip()))  # regras gerais primeiro
+            self.assertIn("DIREITO DO TRABALHO", sistema)
+            self.assertNotIn("DIREITO PENAL", sistema)
+        self.assertTrue(p.sistemas[1].rstrip().endswith(analysis.CHAT_SYSTEM_SUFFIX.rstrip()))
+        self.assertTrue(p.sistemas[2].rstrip().endswith(analysis.DRAFT_SYSTEM_SUFFIX.rstrip()))
+
+    def test_tamanho_da_orientacao_cabe_no_limite_de_tokens(self):
+        # ~4 caracteres por token: cada bloco fica abaixo de ~1.600 tokens.
+        for area in areas.AREAS:
+            for tarefa in areas.TAREFAS:
+                self.assertLess(len(areas.orientacao_da_area(area["id"], tarefa)), 6_500, (area["id"], tarefa))
 
 
 class Mapeador(unittest.TestCase):
@@ -441,6 +505,32 @@ class Rotas(unittest.TestCase):
         r3 = self.c.post("/analise/c1", json={"user_id": "A", "fonte_tipo": "transcricao"})
         self.assertEqual(r3.json()["analise"]["fontesIds"], ["pdf1"])
         self.assertNotIn("ANÁLISE ANTERIOR", self.ia.prompts[-1])
+
+    def test_area_do_caso_vai_para_a_ia_e_fica_na_versao(self):
+        self.casos[("A", "c1")]["area"] = "previdenciario"
+        self.saidas.append(json.dumps(BASE))
+        r = self.c.post("/analise/c1", json={"user_id": "A"})
+        self.assertEqual(r.json()["analise"]["area"], "previdenciario")
+        self.assertIn("DIREITO PREVIDENCIÁRIO", self.ia.sistemas[-1])
+        self.saidas.append("Resposta")
+        self.c.post("/chat/c1", json={"user_id": "A", "mensagem": "Tem carência?"})
+        self.assertIn("DIREITO PREVIDENCIÁRIO", self.ia.sistemas[-1])
+        self.saidas.append("MINUTA PARA REVISÃO")
+        self.c.post("/pecas/c1", json={"user_id": "A", "modelo_id": "inicial-previdenciaria"})
+        self.assertIn("ORIENTAÇÃO PARA A MINUTA", self.ia.sistemas[-1])
+
+        self.casos[("A", "c1")]["area"] = None  # caso antigo, sem área
+        self.saidas.append(json.dumps(BASE))
+        r = self.c.post("/analise/c1", json={"user_id": "A", "incluir_chat": True})
+        self.assertNotIn("area", r.json()["analise"])
+        self.assertEqual(self.ia.sistemas[-1], analysis.SYSTEM_PROMPT)
+
+    def test_lista_de_areas_para_o_front(self):
+        lista = self.c.get("/areas").json()["areas"]
+        self.assertEqual(len(lista), 12)
+        penal = next(a for a in lista if a["id"] == "penal")
+        self.assertEqual(penal["nome"], "Direito Penal")
+        self.assertIn("penal", penal["gruposPecas"])
 
     def test_outro_usuario_e_modelo_invalido(self):
         self.assertEqual(self.c.get("/analise/c1?user_id=B").status_code, 404)

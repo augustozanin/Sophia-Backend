@@ -10,7 +10,8 @@ import unicodedata
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-_TRIBUNAL_RE = re.compile(r"\b(STF|STJ|TST|TSE|STM|TRF\s?\d|TRT\s?\d+|TJ[A-Z]{2}|TRE-?[A-Z]{2})\b")
+_TRIBUNAL_RE = re.compile(
+    r"\b(STF|STJ|TST|TSE|STM|TNU|CARF|TCU|TRF\s?\d|TRT\s?\d+|TJ[A-Z]{2}|TRE-?[A-Z]{2})\b")
 _URL_RE = re.compile(r"https?://\S+")
 _NIVEIS = {"alta", "media", "baixa"}
 _POSICOES = {"majoritaria", "minoritaria", "em_analise"}
@@ -102,6 +103,8 @@ def para_analise_front(registro: Dict[str, Any], caso_id: str) -> Dict[str, Any]
         "demonstracao": False,
         "origem": "chat" if registro.get("origem") == "chat" else "relato",
     }
+    if registro.get("area"):
+        out["area"] = registro["area"]
     if registro.get("fonte_tipo"):
         out["fonteTipo"] = registro["fonte_tipo"]
     if registro.get("fonte_id"):

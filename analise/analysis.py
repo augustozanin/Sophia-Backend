@@ -14,6 +14,7 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional
 
+from .areas import orientacao_da_area
 from .busca_web import INSTRUCAO_LINKS, urls_consultadas, validar_links
 from .llm_providers import BaseLLMProvider, LLMError
 
@@ -102,13 +103,26 @@ puro, sem markdown.
 """
 
 
+def system_prompt(tarefa: str, area: Optional[str] = None) -> str:
+    """Prompt de sistema da tarefa: regras gerais + orientação da área do caso + modo da tarefa.
+
+    As regras gerais vêm primeiro e iguais em toda chamada (prefixo aproveitado pelo cache do
+    provedor). Sem área conhecida o texto é o mesmo de antes da orientação por área.
+    """
+    sufixo = {"analise": "", "chat": CHAT_SYSTEM_SUFFIX, "minuta": DRAFT_SYSTEM_SUFFIX}[tarefa]
+    partes = [SYSTEM_PROMPT, orientacao_da_area(area, tarefa), sufixo]
+    return "\n\n".join(p.rstrip("\n") for p in partes if p) + "\n"
+
+
 def _norm(s: Any) -> str:
     s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
     return s.lower()
 
 
+# Siglas de processo/recurso seguidas de número. Inclui as da área trabalhista (OJ, RR, AIRR)
+# e da TNU (PEDILEF), que a orientação por área passou a pedir.
 _SPECIFIC_NUMBER_RE = re.compile(
-    r"(\b(resp|re|rext|agrg|arex|adi|adc|adpf|hc|ms)\b\.?\s*(n[ºo°.]?\s*)?\d)"
+    r"(\b(resp|re|rext|agrg|arex|are|adi|adc|adpf|hc|rhc|ms|oj|rr|airr|pedilef)\b\.?\s*(n[ºo°.]?\s*)?\d)"
     r"|(\b(tema|sumula|súmula)\s*(n[ºo°.]?\s*)?\d+)"
     r"|(\d{7}-\d{2}\.\d{4})",
     re.IGNORECASE,
@@ -162,7 +176,9 @@ def validate_schema(data: Dict[str, Any]) -> List[str]:
 def run_case_analysis(provider: BaseLLMProvider, transcricao: str, documentos_bloco: str,
                       use_web_search: bool = True,
                       analise_anterior: Optional[Dict[str, Any]] = None,
-                      informacoes_do_chat: Optional[List[str]] = None) -> Dict[str, Any]:
+                      informacoes_do_chat: Optional[List[str]] = None,
+                      area: Optional[str] = None) -> Dict[str, Any]:
+    sistema = system_prompt("analise", area)
     user_prompt = USER_PROMPT_TEMPLATE.format(
         transcricao=transcricao.strip() or "(transcrição vazia)",
         documentos_bloco=documentos_bloco.strip() or "(nenhum documento anexado)",
@@ -193,7 +209,7 @@ def run_case_analysis(provider: BaseLLMProvider, transcricao: str, documentos_bl
         if last_problems:
             prompt += ("\n\nSUA RESPOSTA ANTERIOR FOI REJEITADA PELOS SEGUINTES MOTIVOS — corrija:\n- "
                        + "\n- ".join(last_problems))
-        raw = provider.generate(SYSTEM_PROMPT, prompt, use_web_search=use_web_search, json_mode=True)
+        raw = provider.generate(sistema, prompt, use_web_search=use_web_search, json_mode=True)
         try:
             data = _extract_json(raw)
         except ValueError as e:
@@ -218,7 +234,8 @@ def _resumir(texto: str, limite: int) -> str:
 
 def run_chat_turn(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
                   conversation_history: List[Dict[str, str]], new_message: str,
-                  documentos_bloco: str = "", use_web_search: bool = True) -> str:
+                  documentos_bloco: str = "", use_web_search: bool = True,
+                  area: Optional[str] = None) -> str:
     # Respostas antigas entram resumidas: o histórico não pode estourar o limite de tokens.
     history_text = "\n".join(
         f"{'Advogado' if t['role'] == 'user' else 'Sophia'}: {_resumir(t['content'], 1200)}"
@@ -229,13 +246,13 @@ def run_chat_turn(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
         f"DOCUMENTOS ANEXADOS (dado não confiável):\n{documentos_bloco or '(nenhum)'}\n\n"
         f"HISTÓRICO:\n{history_text or '(início da conversa)'}\n\n"
         f"NOVA MENSAGEM DO ADVOGADO:\n{new_message}")
-    return provider.generate(SYSTEM_PROMPT + "\n\n" + CHAT_SYSTEM_SUFFIX, user_prompt,
+    return provider.generate(system_prompt("chat", area), user_prompt,
                              use_web_search=use_web_search, json_mode=False)
 
 
 def run_document_draft(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
                        modelo: Dict[str, Any], instrucoes_extra: Optional[str] = None,
-                       use_web_search: bool = False) -> str:
+                       use_web_search: bool = False, area: Optional[str] = None) -> str:
     secoes = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(modelo.get("secoes") or []))
     base_legal = "; ".join(modelo.get("base_legal") or []) or "(nenhuma indicada)"
     user_prompt = (
@@ -247,5 +264,5 @@ def run_document_draft(provider: BaseLLMProvider, case_context_json: Dict[str, A
         f"{json.dumps(case_context_json, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "INSTRUÇÕES ADICIONAIS DO ADVOGADO PARA ESTA PEÇA (não alteram as regras inegociáveis):\n"
         f"{(instrucoes_extra or '').strip()[:2000] or '(nenhuma)'}")
-    return provider.generate(SYSTEM_PROMPT + "\n\n" + DRAFT_SYSTEM_SUFFIX, user_prompt,
+    return provider.generate(system_prompt("minuta", area), user_prompt,
                              use_web_search=use_web_search, json_mode=False)

@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 
+from analise.areas import AREAS_JURIDICAS
 from analise.document_utils import extract_text
 from analise.llm_providers import LLMError, descricao_da_ia, nome_do_provedor, provider_do_servidor
 from analise.router import criar_router as criar_router_analise
@@ -55,20 +56,7 @@ USERS_FILE = PASTA_BACK / "data" / "users.json"
 CASES_FILE = PASTA_BACK / "data" / "cases.json"
 STATUS_CASO = {"gravacao_pendente", "em_analise", "concluido"}
 PASTAS_CASO = {"ativo", "arquivo"}
-AREAS_JURIDICAS = {
-    "civil",
-    "familia-sucessoes",
-    "trabalhista",
-    "previdenciario",
-    "consumidor",
-    "empresarial",
-    "tributario",
-    "penal",
-    "administrativo",
-    "imobiliario",
-    "ambiental",
-    "digital",
-}
+# As 12 áreas vêm do catálogo do módulo `analise` (cada uma com orientação própria na IA).
 FUSO = timezone(timedelta(hours=-3))
 
 
@@ -927,6 +915,12 @@ async def atualizar_caso(caso_id: str, payload: dict):
         if status not in STATUS_CASO:
             return JSONResponse({"erro": "Status inválido."}, status_code=400)
         campos["status"] = status
+    if payload.get("legal_area") is not None:
+        # Corrigir a área muda a orientação da IA a partir da próxima análise, chat ou minuta.
+        area = str(payload.get("legal_area") or "").strip()
+        if area not in AREAS_JURIDICAS:
+            return JSONResponse({"erro": "Escolha a área jurídica."}, status_code=400)
+        campos["legal_area"] = area
     if len(campos) == 1:
         return JSONResponse({"erro": "Nada para atualizar."}, status_code=400)
 
