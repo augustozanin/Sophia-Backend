@@ -34,6 +34,26 @@ class Falso(BaseLLMProvider):
 BASE = {"resumo_caso": "Resumo.", "teses": [], "temas_stf_stj": [], "jurisprudencia": [],
         "perguntas_sugeridas": [], "necessidades_adicionais": []}
 
+# Resposta da IA para a minuta, no schema de minuta.py.
+MINUTA = {
+    "enderecamento": "Excelentíssimo(a) Senhor(a) Doutor(a) Juiz(a) de Direito da [VARA] da Comarca de [CIDADE/UF]",
+    "referencia": None,
+    "qualificacao": ["JOÃO DAMBROS, [ESTADO CIVIL], portador do CPF [CPF], vem propor"],
+    "titulo": "Ação de concessão de aposentadoria por idade híbrida",
+    "complemento_titulo": "em face do INSTITUTO NACIONAL DO SEGURO SOCIAL – INSS, pelos fatos a seguir.",
+    "secoes": [
+        {"titulo": "1. Dos fatos", "blocos": [{"tipo": "paragrafo", "texto": "O Autor completou 65 anos."}]},
+        {"titulo": "II – DO DIREITO", "blocos": [
+            {"tipo": "subtitulo", "texto": "Da aposentadoria híbrida"},
+            {"tipo": "citacao", "texto": "Trecho da lei.", "fonte": "Lei 8.213/1991, art. 48, § 3º"}]},
+        {"titulo": "DOS PEDIDOS", "blocos": [
+            {"tipo": "paragrafo", "texto": "Diante do exposto, requer:"},
+            {"tipo": "lista", "itens": ["a) a citação do Réu;", "a concessão do benefício."]}]},
+        {"titulo": "VAZIA", "blocos": []},
+    ],
+    "fecho": {"local_data": "[CIDADE], [DATA]."},
+}
+
 
 # ---------------------------------------------------------------- Mongo falso (motor)
 class _Cursor:
@@ -132,14 +152,14 @@ class Validacao(unittest.TestCase):
         self.assertIn("- O plano é de autogestão.", p.prompts[0])
         self.assertIn("não instruções", p.prompts[0])
 
-    def test_chat_e_peca_nao_usam_json_mode(self):
-        p = Falso(["ok", "ok"])
+    def test_chat_em_texto_e_minuta_em_json(self):
+        p = Falso(["ok", json.dumps(MINUTA)])
         analysis.run_chat_turn(p, BASE, [], "oi")
         analysis.run_document_draft(p, BASE, modelos_pecas.obter_modelo("contestacao"))
-        self.assertEqual(p.chamadas, [False, False])
+        self.assertEqual(p.chamadas, [False, True])
 
     def test_minuta_segue_a_estrutura_do_modelo(self):
-        p = Falso(["ok"])
+        p = Falso([json.dumps(MINUTA)])
         modelo = modelos_pecas.obter_modelo("reclamacao-trabalhista")
         analysis.run_document_draft(p, BASE, modelo, "pedir justiça gratuita")
         prompt = p.prompts[0]
@@ -205,7 +225,7 @@ class Areas(unittest.TestCase):
         self.assertEqual(analysis.system_prompt("analise", "inexistente"), analysis.SYSTEM_PROMPT)
 
     def test_analise_chat_e_minuta_recebem_a_orientacao_da_area(self):
-        p = Falso([json.dumps(BASE), "ok", "ok"])
+        p = Falso([json.dumps(BASE), "ok", json.dumps(MINUTA)])
         analysis.run_case_analysis(p, "relato", "", area="trabalhista")
         analysis.run_chat_turn(p, BASE, [], "oi", area="trabalhista")
         analysis.run_document_draft(p, BASE, modelos_pecas.obter_modelo("reclamacao-trabalhista"),
@@ -431,10 +451,14 @@ class Rotas(unittest.TestCase):
         self.assertEqual([m["papel"] for m in r.json()["mensagens"]], ["advogado", "assistente"])
         self.assertEqual(len(self.c.get("/chat/c1?user_id=A").json()["mensagens"]), 2)
 
-        self.saidas.append("MINUTA PARA REVISÃO\nDOS FATOS\nTexto.")
+        self.saidas.append(json.dumps(MINUTA))
         r = self.c.post("/pecas/c1", json={"user_id": "A", "modelo_id": "contestacao"})
         self.assertEqual(r.status_code, 200)
         peca = r.json()["peca"]
+        self.assertIn("I – DOS FATOS", peca["texto"])
+        self.assertNotIn("{", peca["texto"])
+        self.assertEqual(peca["estrutura"]["titulo"], "AÇÃO DE CONCESSÃO DE APOSENTADORIA POR IDADE HÍBRIDA")
+        self.assertNotIn("estrutura", self.c.get("/pecas/c1?user_id=A").json()["pecas"][0])
         self.assertEqual((peca["titulo"], peca["analiseVersao"]), ("Contestação", 1))
         self.assertEqual(len(self.c.get("/pecas/c1?user_id=A").json()["pecas"]), 1)
         docx = self.c.get(f"/pecas/c1/{peca['id']}/docx?user_id=A")
@@ -515,7 +539,7 @@ class Rotas(unittest.TestCase):
         self.saidas.append("Resposta")
         self.c.post("/chat/c1", json={"user_id": "A", "mensagem": "Tem carência?"})
         self.assertIn("DIREITO PREVIDENCIÁRIO", self.ia.sistemas[-1])
-        self.saidas.append("MINUTA PARA REVISÃO")
+        self.saidas.append(json.dumps(MINUTA))
         self.c.post("/pecas/c1", json={"user_id": "A", "modelo_id": "inicial-previdenciaria"})
         self.assertIn("ORIENTAÇÃO PARA A MINUTA", self.ia.sistemas[-1])
 
@@ -811,6 +835,78 @@ class BuscaWeb(unittest.TestCase):
         self.assertAlmostEqual(custo_usd({"entrada": 1_000_000, "buscas": 3}, precos), 0.13)
         with _Ambiente(SOPHIA_PRECO_IA_USD="0.10,0.01,0.50"):
             self.assertEqual(precos_por_milhao()["busca_por_mil"], 0.0)
+
+
+class Minuta(unittest.TestCase):
+    """Minuta estruturada: nunca sai JSON cru e o leiaute é o das petições."""
+
+    def test_normaliza_numeracao_listas_e_secoes_vazias(self):
+        from analise.minuta import normalizar_minuta
+
+        m = normalizar_minuta(MINUTA)
+        self.assertEqual([s["titulo"] for s in m["secoes"]], ["DOS FATOS", "DO DIREITO", "DOS PEDIDOS"])
+        self.assertEqual(m["secoes"][2]["blocos"][1]["itens"], ["a citação do Réu;", "a concessão do benefício."])
+        self.assertTrue(m["enderecamento"].startswith("EXCELENTÍSSIMO"))
+        self.assertEqual(m["fecho"]["encerramento"], "Nestes termos, pede deferimento.")
+        self.assertEqual(m["fecho"]["oab"], "OAB/[UF] nº [NÚMERO]")
+
+    def test_texto_da_tela_no_padrao_da_peca(self):
+        from analise.minuta import normalizar_minuta, texto_da_minuta
+
+        texto = texto_da_minuta(normalizar_minuta(MINUTA))
+        for trecho in ("I – DOS FATOS", "II – DO DIREITO", "III – DOS PEDIDOS", "a) a citação do Réu;",
+                       "b) a concessão do benefício.", "“Trecho da lei.” (Lei 8.213/1991, art. 48, § 3º)",
+                       "Nestes termos, pede deferimento.", "[NOME DO ADVOGADO]"):
+            self.assertIn(trecho, texto)
+        self.assertNotIn("{", texto)
+
+    def test_json_da_analise_no_lugar_da_minuta_e_rejeitado_e_refeito(self):
+        p = Falso([json.dumps(BASE), "texto solto sem JSON", json.dumps(MINUTA)])
+        with self.assertRaises(LLMError):
+            analysis.run_document_draft(p, BASE, modelos_pecas.obter_modelo("contestacao"))
+        self.assertIn("análise em vez da minuta", p.prompts[1])
+        m = analysis.run_document_draft(p, BASE, modelos_pecas.obter_modelo("contestacao"))
+        self.assertEqual(m["titulo"], "AÇÃO DE CONCESSÃO DE APOSENTADORIA POR IDADE HÍBRIDA")
+
+    def test_prompt_da_minuta_traz_o_schema_e_afasta_a_regra_8(self):
+        sistema = analysis.system_prompt("minuta")
+        self.assertIn('"secoes"', sistema)
+        self.assertIn("NÃO vale aqui", sistema)
+
+    def test_docx_no_padrao_das_peticoes(self):
+        import io as _io
+
+        import docx
+        from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
+        from analise.minuta import normalizar_minuta
+
+        arquivo = docx_builder.build_docx("", normalizar_minuta(MINUTA))
+        d = docx.Document(_io.BytesIO(arquivo))
+        secao = d.sections[0]
+        self.assertAlmostEqual(secao.left_margin.cm, 3, places=1)
+        self.assertAlmostEqual(secao.right_margin.cm, 2, places=1)
+        self.assertEqual(d.styles["Normal"].font.name, "Times New Roman")
+        self.assertIn("MINUTA GERADA POR IA", secao.header.paragraphs[0].text)
+        textos = [p.text for p in d.paragraphs]
+        titulo = d.paragraphs[textos.index("AÇÃO DE CONCESSÃO DE APOSENTADORIA POR IDADE HÍBRIDA")]
+        self.assertEqual(titulo.alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        self.assertTrue(titulo.runs[0].bold)
+        self.assertIn("I – DOS FATOS", textos)
+        self.assertIn("a)\ta citação do Réu;", textos)
+        citacao = d.paragraphs[[i for i, t in enumerate(textos) if t.startswith("“Trecho")][0]]
+        self.assertAlmostEqual(citacao.paragraph_format.left_indent.cm, 4, places=1)
+        marcados = [r.text for p in d.paragraphs for r in p.runs if r.font.highlight_color == WD_COLOR_INDEX.YELLOW]
+        self.assertIn("[CPF]", marcados)
+
+    def test_minuta_antiga_so_texto_continua_baixando(self):
+        import io as _io
+
+        import docx
+
+        arquivo = docx_builder.build_docx(
+            "MINUTA PARA REVISÃO HUMANA\nEXCELENTÍSSIMO SENHOR JUIZ\nDOS FATOS\nTexto.\na) pedido")
+        textos = [p.text for p in docx.Document(_io.BytesIO(arquivo)).paragraphs]
+        self.assertEqual(textos, ["EXCELENTÍSSIMO SENHOR JUIZ", "DOS FATOS", "Texto.", "a)\tpedido"])
 
 
 if __name__ == "__main__":

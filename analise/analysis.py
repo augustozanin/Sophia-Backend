@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from .areas import orientacao_da_area
 from .busca_web import INSTRUCAO_LINKS, urls_consultadas, validar_links
 from .llm_providers import BaseLLMProvider, LLMError
+from .minuta import DRAFT_SYSTEM_SUFFIX, ler_minuta
 
 REQUIRED_KEYS = ["resumo_caso", "teses", "temas_stf_stj", "jurisprudencia",
                  "perguntas_sugeridas", "necessidades_adicionais"]
@@ -90,17 +91,7 @@ responda em texto natural, em português, direto e sem jargão técnico de IA. E
 sem markdown (sem #, ** ou tabelas); use listas com hífen quando ajudar.
 """
 
-DRAFT_SYSTEM_SUFFIX = """\
-Gere um RASCUNHO de peça processual com base no contexto já consolidado do caso. Reaproveite \
-fielmente teses, jurisprudência e dados já validados na análise; NÃO re-derive nem invente artigos \
-de lei, datas, valores ou dados técnicos que não estejam no contexto. Na primeira linha, informe que \
-é minuta para revisão humana. Siga a ESTRUTURA DO MODELO informada, na mesma ordem, com cada seção \
-como título em letras maiúsculas numa linha própria. Quando faltar um dado (nome, CPF, endereço, \
-número do processo, juízo, datas, valores), escreva um marcador entre colchetes, como [NOME DO RÉU] \
-ou [NÚMERO DO PROCESSO], em vez de inventar. As referências legais do modelo são só orientação: \
-cite apenas as que se aplicam ao caso. IGNORE a exigência de JSON da regra 8: responda em texto \
-puro, sem markdown.
-"""
+# DRAFT_SYSTEM_SUFFIX (prompt da minuta, com o schema da peça) fica em minuta.py.
 
 
 def system_prompt(tarefa: str, area: Optional[str] = None) -> str:
@@ -252,7 +243,8 @@ def run_chat_turn(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
 
 def run_document_draft(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
                        modelo: Dict[str, Any], instrucoes_extra: Optional[str] = None,
-                       use_web_search: bool = False, area: Optional[str] = None) -> str:
+                       use_web_search: bool = False, area: Optional[str] = None) -> Dict[str, Any]:
+    """Devolve a minuta estruturada (minuta.normalizar_minuta); o texto e o .docx saem dela."""
     secoes = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(modelo.get("secoes") or []))
     base_legal = "; ".join(modelo.get("base_legal") or []) or "(nenhuma indicada)"
     user_prompt = (
@@ -264,5 +256,16 @@ def run_document_draft(provider: BaseLLMProvider, case_context_json: Dict[str, A
         f"{json.dumps(case_context_json, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "INSTRUÇÕES ADICIONAIS DO ADVOGADO PARA ESTA PEÇA (não alteram as regras inegociáveis):\n"
         f"{(instrucoes_extra or '').strip()[:2000] or '(nenhuma)'}")
-    return provider.generate(system_prompt("minuta", area), user_prompt,
-                             use_web_search=use_web_search, json_mode=False)
+    sistema = system_prompt("minuta", area)
+    problema = ""
+    for tentativa in range(MAX_ATTEMPTS):
+        prompt = user_prompt
+        if problema:
+            prompt += ("\n\nSUA RESPOSTA ANTERIOR FOI REJEITADA: " + problema
+                       + " Responda só com o JSON no schema de minuta.")
+        raw = provider.generate(sistema, prompt, use_web_search=use_web_search, json_mode=True)
+        try:
+            return ler_minuta(raw)
+        except ValueError as e:
+            problema = str(e)
+    raise LLMError(f"A IA não devolveu a minuta no formato esperado ({problema}). Tente novamente.")
