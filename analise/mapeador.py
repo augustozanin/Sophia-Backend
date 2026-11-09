@@ -137,4 +137,7 @@ def peca_front(p: Dict[str, Any], com_texto: bool = True) -> Dict[str, Any]:
         out["instrucoes"] = p["instrucoes"]
     if com_texto:
         out["texto"] = p["texto"]
+        if p.get("estrutura"):
+            # Partes da peça (minuta.py), para a tela mostrar no mesmo leiaute do .docx.
+            out["estrutura"] = p["estrutura"]
     return out

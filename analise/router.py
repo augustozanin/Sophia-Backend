@@ -25,6 +25,7 @@ from .analysis import run_case_analysis, run_chat_turn, run_document_draft
 from .areas import AREAS, area_front, normalizar_area
 from .contexto import bloco_dos_documentos, fontes_para_salvar, material_para_analise, texto_dos_relatos
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
+from .minuta import texto_da_minuta
 from .llm_providers import LLMError, provider_do_servidor
 from .consumo import resumo_do_consumo
 from .mapeador import mensagem_front, modelo_front, para_analise_front, peca_front
@@ -267,7 +268,7 @@ def criar_router(obter_contexto: ObterContexto,
         if not peca:
             return _erro("Minuta não encontrada.", 404)
         try:
-            conteudo = build_docx(peca["texto"])
+            conteudo = build_docx(peca["texto"], peca.get("estrutura"))
         except DocxIndisponivel as e:
             return _erro(str(e), 503)
         return Response(
@@ -293,15 +294,14 @@ def criar_router(obter_contexto: ObterContexto,
         provider = None
         try:
             provider = provider_do_servidor()
-            rascunho = await run_in_threadpool(run_document_draft, provider, contexto, modelo, instrucoes,
+            estrutura = await run_in_threadpool(run_document_draft, provider, contexto, modelo, instrucoes,
                                                area=_area_do_caso(ctx))
         except LLMError as e:
             return _erro(str(e), 502)
         finally:
             await _registrar(arm, user_id, caso_id, "peca", provider)
-        if not rascunho.strip():
-            return _erro("A IA não devolveu texto para a minuta. Tente novamente.", 502)
-        peca = await arm.salvar_peca(user_id, caso_id, modelo, rascunho.strip(), instrucoes, ultima["versao"])
+        peca = await arm.salvar_peca(user_id, caso_id, modelo, texto_da_minuta(estrutura), instrucoes,
+                                     ultima["versao"], estrutura)
         return {"peca": peca_front(peca), "aviso": "Minuta gerada por IA — revise antes de protocolar."}
 
     return router

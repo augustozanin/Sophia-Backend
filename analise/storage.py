@@ -136,16 +136,20 @@ class Armazenamento:
         return {"id": str(doc["_id"]), **{k: v for k, v in doc.items() if k not in ("_id", "user_id")}}
 
     async def salvar_peca(self, user_id: str, caso_id: str, modelo: Dict[str, Any], texto: str,
-                          instrucoes: Optional[str], analise_versao: Optional[int]) -> Dict[str, Any]:
+                          instrucoes: Optional[str], analise_versao: Optional[int],
+                          estrutura: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """texto: versão para a tela; estrutura: partes da peça, de onde sai o .docx (minuta.py)."""
         await self.garantir_indices()
         doc = {"_id": ObjectId(), "user_id": user_id, "caso_id": caso_id, "modelo_id": modelo["id"],
                "titulo": modelo["nome"], "texto": texto, "instrucoes": instrucoes or None,
                "analise_versao": analise_versao, "gerada_em": agora()}
+        if estrutura:
+            doc["estrutura"] = estrutura
         await self.pecas.insert_one(doc)
         return self._peca(doc)
 
     async def listar_pecas(self, user_id: str, caso_id: str) -> List[Dict[str, Any]]:
-        cursor = (self.pecas.find({"user_id": user_id, "caso_id": caso_id}, {"texto": 0})
+        cursor = (self.pecas.find({"user_id": user_id, "caso_id": caso_id}, {"texto": 0, "estrutura": 0})
                   .sort("gerada_em", DESCENDING))
         return [self._peca(d) for d in await cursor.to_list(length=200)]
 
