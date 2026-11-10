@@ -110,6 +110,23 @@ class _Colecao:
             cursor.sort(sort)
         return cursor.docs[0] if cursor.docs else None
 
+    async def find_one_and_replace(self, filtro, novo, projection=None):
+        for i, d in enumerate(self.docs):
+            if self._bate(d, filtro):
+                self.docs[i] = dict(novo, _id=d["_id"])
+                return {"_id": d["_id"]}
+        return None
+
+    async def delete_one(self, filtro):
+        for i, d in enumerate(self.docs):
+            if self._bate(d, filtro):
+                del self.docs[i]
+                return type("R", (), {"deleted_count": 1})()
+        return type("R", (), {"deleted_count": 0})()
+
+    async def count_documents(self, filtro):
+        return len([d for d in self.docs if self._bate(d, filtro)])
+
 
 class _Banco(dict):
     def __getitem__(self, nome):
@@ -907,6 +924,97 @@ class Minuta(unittest.TestCase):
             "MINUTA PARA REVISÃO HUMANA\nEXCELENTÍSSIMO SENHOR JUIZ\nDOS FATOS\nTexto.\na) pedido")
         textos = [p.text for p in docx.Document(_io.BytesIO(arquivo)).paragraphs]
         self.assertEqual(textos, ["EXCELENTÍSSIMO SENHOR JUIZ", "DOS FATOS", "Texto.", "a)\tpedido"])
+
+
+def _docx_do_escritorio(corpo: str) -> bytes:
+    """Peça-modelo em Word com timbre no cabeçalho, como um escritório enviaria."""
+    import io as _io
+
+    import docx
+
+    d = docx.Document()
+    d.sections[0].header.paragraphs[0].text = "SILVA & SOUZA ADVOCACIA — Rua das Flores, 100"
+    for _ in range(3):
+        d.add_paragraph(corpo)
+    saida = _io.BytesIO()
+    d.save(saida)
+    return saida.getvalue()
+
+
+class ModelosDoEscritorio(unittest.TestCase):
+    """Modelo enviado pelo advogado orienta as próximas minutas e dá o timbre do .docx."""
+
+    TEXTO = ("EXCELENTÍSSIMO SENHOR JUIZ. Dr. Carlos Silva, OAB/SP 123.456, com escritório na Rua das "
+             "Flores, 100, vem expor e requerer. DOS FATOS. Texto padrão do escritório. ")
+
+    def setUp(self):
+        Rotas.setUp(self)
+        self.saidas.append(json.dumps(BASE))
+        self.c.post("/analise/c1", json={"user_id": "A"})
+
+    def enviar(self, nome, conteudo, aplica_a="todas", user_id="A", titulo="Modelo"):
+        return self.c.post("/modelos-escritorio", data={"user_id": user_id, "nome": titulo, "aplica_a": aplica_a},
+                           files={"arquivo": (nome, conteudo)})
+
+    def test_envio_lista_substitui_e_exclui(self):
+        r = self.enviar("timbrado.docx", _docx_do_escritorio(self.TEXTO), titulo="Padrão do escritório")
+        self.assertEqual(r.status_code, 200)
+        geral = r.json()["modelo"]
+        self.assertEqual((geral["aplicaA"], geral["comTimbre"], geral["tipo"]), ("todas", True, "docx"))
+        self.assertEqual(self.enviar("contestacao.txt", self.TEXTO.encode() * 2, "contestacao").status_code, 200)
+        # Outro modelo para "todas" substitui o anterior, sem duplicar.
+        r = self.enviar("novo.txt", self.TEXTO.encode() * 2, titulo="Novo padrão")
+        self.assertEqual(r.json()["modelo"]["id"], geral["id"])
+        lista = self.c.get("/modelos-escritorio?user_id=A").json()["modelos"]
+        self.assertEqual(sorted(m["nome"] for m in lista), ["Modelo", "Novo padrão"])
+        self.assertNotIn("texto", lista[0])
+        self.assertEqual(self.c.get("/modelos-escritorio?user_id=B").json()["modelos"], [])
+        self.assertEqual(self.c.delete(f"/modelos-escritorio/{geral['id']}?user_id=B").status_code, 404)
+        self.assertEqual(self.c.delete(f"/modelos-escritorio/{geral['id']}?user_id=A").status_code, 204)
+        self.assertEqual(len(self.c.get("/modelos-escritorio?user_id=A").json()["modelos"]), 1)
+
+    def test_arquivos_invalidos(self):
+        self.assertEqual(self.enviar("modelo.odt", b"x" * 500).status_code, 415)
+        self.assertEqual(self.enviar("falso.pdf", b"nao e pdf" * 50).status_code, 415)
+        self.assertEqual(self.enviar("curto.txt", b"pouco texto").status_code, 422)
+        self.assertEqual(self.enviar("ok.txt", self.TEXTO.encode() * 2, "peca-inexistente").status_code, 400)
+
+    def test_minuta_usa_o_modelo_da_peca_ou_o_de_todas(self):
+        self.enviar("geral.docx", _docx_do_escritorio(self.TEXTO), titulo="Geral")
+        self.enviar("contestacao.txt", (self.TEXTO + "MODELO DE CONTESTAÇÃO. ").encode() * 2, "contestacao",
+                    titulo="Contestação do escritório")
+
+        self.saidas.append(json.dumps(MINUTA))
+        peca = self.c.post("/pecas/c1", json={"user_id": "A", "modelo_id": "contestacao"}).json()["peca"]
+        self.assertIn("<modelo_do_escritorio", self.ia.prompts[-1])
+        self.assertIn("MODELO DE CONTESTAÇÃO", self.ia.prompts[-1])
+        self.assertIn("NÃO copie do modelo fatos", self.ia.prompts[-1])
+        self.assertEqual(peca["modeloEscritorio"]["nome"], "Contestação do escritório")
+
+        self.saidas.append(json.dumps(MINUTA))
+        peca = self.c.post("/pecas/c1", json={"user_id": "A", "modelo_id": "peticao-inicial"}).json()["peca"]
+        self.assertNotIn("MODELO DE CONTESTAÇÃO", self.ia.prompts[-1])
+        self.assertEqual(peca["modeloEscritorio"]["nome"], "Geral")
+
+        self.saidas.append(json.dumps(MINUTA))
+        sem = self.c.post("/pecas/c1", json={"user_id": "A", "modelo_id": "peticao-inicial",
+                                              "usar_modelo_escritorio": False}).json()["peca"]
+        self.assertNotIn("<modelo_do_escritorio", self.ia.prompts[-1])
+        self.assertNotIn("modeloEscritorio", sem)
+
+        # O .docx da minuta feita com o modelo em Word mantém o timbre do escritório.
+        import io as _io
+
+        import docx
+
+        arquivo = self.c.get(f"/pecas/c1/{peca['id']}/docx?user_id=A")
+        self.assertEqual(arquivo.status_code, 200)
+        d = docx.Document(_io.BytesIO(arquivo.content))
+        self.assertIn("SILVA & SOUZA ADVOCACIA", d.sections[0].header.paragraphs[0].text)
+        textos = [p.text for p in d.paragraphs]
+        self.assertIn("MINUTA GERADA POR IA", textos[0])
+        self.assertNotIn(self.TEXTO, textos)  # o corpo do modelo não vai para a minuta
+        self.assertIn("I – DOS FATOS", textos)
 
 
 if __name__ == "__main__":

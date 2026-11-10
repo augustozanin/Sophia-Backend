@@ -135,6 +135,8 @@ def peca_front(p: Dict[str, Any], com_texto: bool = True) -> Dict[str, Any]:
            "geradaEm": p["gerada_em"], "analiseVersao": p.get("analise_versao")}
     if p.get("instrucoes"):
         out["instrucoes"] = p["instrucoes"]
+    if p.get("modelo_escritorio"):
+        out["modeloEscritorio"] = p["modelo_escritorio"]
     if com_texto:
         out["texto"] = p["texto"]
         if p.get("estrutura"):

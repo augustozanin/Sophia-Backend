@@ -243,7 +243,8 @@ def run_chat_turn(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
 
 def run_document_draft(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
                        modelo: Dict[str, Any], instrucoes_extra: Optional[str] = None,
-                       use_web_search: bool = False, area: Optional[str] = None) -> Dict[str, Any]:
+                       use_web_search: bool = False, area: Optional[str] = None,
+                       modelo_escritorio: Optional[str] = None) -> Dict[str, Any]:
     """Devolve a minuta estruturada (minuta.normalizar_minuta); o texto e o .docx saem dela."""
     secoes = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(modelo.get("secoes") or []))
     base_legal = "; ".join(modelo.get("base_legal") or []) or "(nenhuma indicada)"
@@ -256,6 +257,9 @@ def run_document_draft(provider: BaseLLMProvider, case_context_json: Dict[str, A
         f"{json.dumps(case_context_json, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "INSTRUÇÕES ADICIONAIS DO ADVOGADO PARA ESTA PEÇA (não alteram as regras inegociáveis):\n"
         f"{(instrucoes_extra or '').strip()[:2000] or '(nenhuma)'}")
+    if modelo_escritorio:
+        # Bloco de modelos_escritorio.bloco_do_prompt: estrutura e estilo do próprio advogado.
+        user_prompt += "\n\n" + modelo_escritorio
     sistema = system_prompt("minuta", area)
     problema = ""
     for tentativa in range(MAX_ATTEMPTS):

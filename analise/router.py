@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -29,6 +29,9 @@ from .minuta import texto_da_minuta
 from .llm_providers import LLMError, provider_do_servidor
 from .consumo import resumo_do_consumo
 from .mapeador import mensagem_front, modelo_front, para_analise_front, peca_front
+from .document_utils import extract_text
+from .modelos_escritorio import (LIMITE_TEXTO, MAX_MODELOS, TODAS, TAMANHO_MAX, bloco_do_prompt,
+                                 modelo_front as modelo_escritorio_front, validar_arquivo)
 from .modelos_pecas import FASES, GRUPOS, MODELOS, obter_modelo
 from .storage import Armazenamento
 
@@ -61,6 +64,8 @@ class PecaIn(BaseModel):
     user_id: str
     modelo_id: str
     instrucoes: Optional[str] = None
+    # Usa o modelo do escritório do advogado, se houver um para a peça ou para todas.
+    usar_modelo_escritorio: bool = True
 
 
 def _erro(msg: str, status: int) -> JSONResponse:
@@ -268,7 +273,12 @@ def criar_router(obter_contexto: ObterContexto,
         if not peca:
             return _erro("Minuta não encontrada.", 404)
         try:
-            conteudo = build_docx(peca["texto"], peca.get("estrutura"))
+            base = None
+            usado = peca.get("modelo_escritorio") or {}
+            if usado.get("id"):
+                modelo_esc = await arm.obter_modelo_escritorio(user_id.strip(), usado["id"])
+                base = (modelo_esc or {}).get("docx")
+            conteudo = build_docx(peca["texto"], peca.get("estrutura"), base=base)
         except DocxIndisponivel as e:
             return _erro(str(e), 503)
         return Response(
@@ -291,17 +301,77 @@ def criar_router(obter_contexto: ObterContexto,
         instrucoes = (body.instrucoes or "").strip()[:2000] or None
         contexto = {"caso": _resumo_do_caso(ctx), "analise": ultima["analise"],
                     "relato": texto_dos_relatos(ctx["relatos"], LIMITE_RELATO_CHAT)}
+        modelo_esc = (await arm.modelo_escritorio_para(user_id, modelo["id"])
+                      if body.usar_modelo_escritorio else None)
         provider = None
         try:
             provider = provider_do_servidor()
-            estrutura = await run_in_threadpool(run_document_draft, provider, contexto, modelo, instrucoes,
-                                               area=_area_do_caso(ctx))
+            estrutura = await run_in_threadpool(
+                run_document_draft, provider, contexto, modelo, instrucoes, area=_area_do_caso(ctx),
+                modelo_escritorio=bloco_do_prompt(modelo_esc) if modelo_esc else None)
         except LLMError as e:
             return _erro(str(e), 502)
         finally:
             await _registrar(arm, user_id, caso_id, "peca", provider)
+        usado = {"id": modelo_esc["id"], "nome": modelo_esc["nome"]} if modelo_esc else None
         peca = await arm.salvar_peca(user_id, caso_id, modelo, texto_da_minuta(estrutura), instrucoes,
-                                     ultima["versao"], estrutura)
+                                     ultima["versao"], estrutura, usado)
         return {"peca": peca_front(peca), "aviso": "Minuta gerada por IA — revise antes de protocolar."}
+
+    # ------------------------------------------------------------ modelos do escritório
+    @router.get("/modelos-escritorio")
+    async def listar_modelos_escritorio(user_id: str = ""):
+        user_id = user_id.strip()
+        arm = armazenamento()
+        if not user_id:
+            return _erro("Informe o usuário.", 400)
+        if arm is None:
+            return _erro("MongoDB não configurado.", 503)
+        return {"modelos": [modelo_escritorio_front(m) for m in await arm.listar_modelos_escritorio(user_id)]}
+
+    @router.post("/modelos-escritorio")
+    async def enviar_modelo_escritorio(user_id: str = Form(""), nome: str = Form(""),
+                                       aplica_a: str = Form(TODAS), arquivo: UploadFile = File(...)):
+        """Recebe a peça-modelo (DOCX, PDF ou TXT), extrai o texto e guarda o .docx para o timbre."""
+        user_id, nome, aplica_a = user_id.strip(), nome.strip()[:120], (aplica_a or TODAS).strip()
+        arm = armazenamento()
+        if not user_id:
+            return _erro("Informe o usuário.", 400)
+        if arm is None:
+            return _erro("MongoDB não configurado.", 503)
+        if aplica_a != TODAS and not obter_modelo(aplica_a):
+            return _erro("Escolha em quais peças o modelo vale.", 400)
+        arquivo_nome = (arquivo.filename or "").strip() or "modelo"
+        conteudo = await arquivo.read(TAMANHO_MAX + 1)
+        problema = validar_arquivo(arquivo_nome, conteudo)
+        if problema:
+            return _erro(problema, 413 if len(conteudo) > TAMANHO_MAX else 415)
+        existentes = await arm.listar_modelos_escritorio(user_id)
+        if len(existentes) >= MAX_MODELOS and not any(m["aplica_a"] == aplica_a for m in existentes):
+            return _erro(f"Limite de {MAX_MODELOS} modelos atingido. Exclua um antes de enviar outro.", 409)
+        try:
+            extraido = await run_in_threadpool(extract_text, arquivo_nome, conteudo)
+        except Exception as exc:  # noqa: BLE001
+            return _erro(f"Não foi possível ler o arquivo: {exc}", 422)
+        texto = extraido.text.strip()
+        if len(texto) < 200:
+            return _erro("O modelo tem pouco texto para orientar a IA. Se for um PDF escaneado, "
+                         "envie em Word ou TXT.", 422)
+        tipo = arquivo_nome.rsplit(".", 1)[-1].lower()
+        salvo = await arm.salvar_modelo_escritorio(
+            user_id, aplica_a, nome or arquivo_nome.rsplit(".", 1)[0], arquivo_nome, tipo,
+            texto[:LIMITE_TEXTO * 2], conteudo if tipo == "docx" else None)
+        return {"modelo": modelo_escritorio_front(salvo)}
+
+    @router.delete("/modelos-escritorio/{modelo_id}")
+    async def excluir_modelo_escritorio(modelo_id: str, user_id: str = ""):
+        arm = armazenamento()
+        if not user_id.strip():
+            return _erro("Informe o usuário.", 400)
+        if arm is None:
+            return _erro("MongoDB não configurado.", 503)
+        if not await arm.excluir_modelo_escritorio(user_id.strip(), modelo_id):
+            return _erro("Modelo não encontrado.", 404)
+        return Response(status_code=204)
 
     return router

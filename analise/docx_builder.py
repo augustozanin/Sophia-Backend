@@ -30,7 +30,7 @@ class DocxIndisponivel(RuntimeError):
 class _Peca:
     """Documento com os estilos da peça e um método para cada tipo de parágrafo."""
 
-    def __init__(self):
+    def __init__(self, base: Optional[bytes] = None):
         # Carregado só no download: sem o pacote, o resto do backend continua funcionando.
         try:
             import docx
@@ -47,6 +47,8 @@ class _Peca:
         self.ALINHA = {"justificado": WD_ALIGN_PARAGRAPH.JUSTIFY, "centro": WD_ALIGN_PARAGRAPH.CENTER,
                        "esquerda": WD_ALIGN_PARAGRAPH.LEFT, "direita": WD_ALIGN_PARAGRAPH.RIGHT}
         self.AMARELO = WD_COLOR_INDEX.YELLOW
+        if base and self._usar_base(docx, base):
+            return
         self.d = docx.Document()
         secao = self.d.sections[0]
         secao.page_width, secao.page_height = Cm(21), Cm(29.7)
@@ -64,6 +66,29 @@ class _Peca:
         formato.space_after = Pt(6)
         self._cabecalho_e_rodape(secao)
 
+    def _usar_base(self, docx, base: bytes) -> bool:
+        """Modelo .docx do escritório como base: mantém timbre (cabeçalho e rodapé), margens e
+        fonte dele e troca só o corpo. Arquivo ilegível cai no leiaute padrão."""
+        try:
+            self.d = docx.Document(io.BytesIO(base))
+        except Exception:  # noqa: BLE001
+            return False
+        corpo = self.d.element.body
+        for elemento in list(corpo):
+            if elemento.tag != self.qn("w:sectPr"):
+                corpo.remove(elemento)
+        # O cabeçalho é do escritório: o aviso de minuta vai no topo do corpo.
+        aviso = self.d.add_paragraph()
+        aviso.alignment = self.ALINHA["centro"]
+        run = aviso.add_run(AVISO)
+        run.bold = True
+        run.font.size = self.Pt(8)
+        run.font.color.rgb = self.RGB(0xA0, 0x30, 0x30)
+        secao = self.d.sections[0]
+        if not any(p.text.strip() for p in secao.footer.paragraphs):
+            self._numero_da_pagina(secao)
+        return True
+
     def _cabecalho_e_rodape(self, secao) -> None:
         aviso = secao.header.paragraphs[0]
         aviso.alignment = self.ALINHA["centro"]
@@ -71,8 +96,10 @@ class _Peca:
         run.bold = True
         run.font.size = self.Pt(8)
         run.font.color.rgb = self.RGB(0xA0, 0x30, 0x30)
+        self._numero_da_pagina(secao)
 
-        rodape = secao.footer.paragraphs[0]
+    def _numero_da_pagina(self, secao) -> None:
+        rodape = secao.footer.paragraphs[0] if secao.footer.paragraphs else secao.footer.add_paragraph()
         rodape.alignment = self.ALINHA["direita"]
         for parte in ("Página ", "PAGE", " de ", "NUMPAGES"):
             r = rodape.add_run()
@@ -220,8 +247,10 @@ def _do_texto(doc: _Peca, rascunho: str) -> None:
             doc.paragrafo(texto)
 
 
-def build_docx(rascunho: str, estrutura: Optional[Dict[str, Any]] = None) -> bytes:
-    doc = _Peca()
+def build_docx(rascunho: str, estrutura: Optional[Dict[str, Any]] = None,
+               base: Optional[bytes] = None) -> bytes:
+    """`base`: .docx do modelo do escritório, para manter o timbre e a formatação dele."""
+    doc = _Peca(base)
     if estrutura:
         _da_estrutura(doc, estrutura)
     else:

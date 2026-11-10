@@ -42,6 +42,8 @@ class Armazenamento:
         self.pecas = db["pecas"]
         # Tokens gastos por chamada à IA (um documento por chamada), para medir o custo por caso.
         self.consumo = db["consumo_ia"]
+        # Peças-modelo do advogado (modelos_escritorio.py): uma por (user_id, aplica_a).
+        self.modelos_escritorio = db["modelos_escritorio"]
         self._indices_prontos = False
 
     async def garantir_indices(self) -> None:
@@ -53,6 +55,8 @@ class Armazenamento:
             [("user_id", ASCENDING), ("caso_id", ASCENDING), ("criada_em", ASCENDING), ("_id", ASCENDING)])
         await self.pecas.create_index(
             [("user_id", ASCENDING), ("caso_id", ASCENDING), ("gerada_em", DESCENDING)])
+        await self.modelos_escritorio.create_index(
+            [("user_id", ASCENDING), ("aplica_a", ASCENDING)], unique=True)
         self._indices_prontos = True
 
     # ------------------------------------------------------------ análises
@@ -137,7 +141,8 @@ class Armazenamento:
 
     async def salvar_peca(self, user_id: str, caso_id: str, modelo: Dict[str, Any], texto: str,
                           instrucoes: Optional[str], analise_versao: Optional[int],
-                          estrutura: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                          estrutura: Optional[Dict[str, Any]] = None,
+                          modelo_escritorio: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """texto: versão para a tela; estrutura: partes da peça, de onde sai o .docx (minuta.py)."""
         await self.garantir_indices()
         doc = {"_id": ObjectId(), "user_id": user_id, "caso_id": caso_id, "modelo_id": modelo["id"],
@@ -145,6 +150,9 @@ class Armazenamento:
                "analise_versao": analise_versao, "gerada_em": agora()}
         if estrutura:
             doc["estrutura"] = estrutura
+        if modelo_escritorio:
+            # {id, nome} do modelo do escritório usado (o .docx usa o timbre dele).
+            doc["modelo_escritorio"] = modelo_escritorio
         await self.pecas.insert_one(doc)
         return self._peca(doc)
 
@@ -175,3 +183,51 @@ class Armazenamento:
     async def listar_consumo(self, user_id: str, caso_id: str) -> List[Dict[str, Any]]:
         cursor = self.consumo.find({"user_id": user_id, "caso_id": caso_id})
         return [_sem_id(d) for d in await cursor.to_list(length=5000)]
+
+    # ------------------------------------------------------------ modelos do escritório
+    @staticmethod
+    def _modelo(doc: Dict[str, Any]) -> Dict[str, Any]:
+        return {"id": str(doc["_id"]), **{k: v for k, v in doc.items() if k not in ("_id", "user_id")}}
+
+    async def salvar_modelo_escritorio(self, user_id: str, aplica_a: str, nome: str, arquivo_nome: str,
+                                       tipo: str, texto: str, docx: Optional[bytes]) -> Dict[str, Any]:
+        """Um modelo por escopo: enviar outro para o mesmo `aplica_a` substitui o anterior."""
+        await self.garantir_indices()
+        doc = {"user_id": user_id, "aplica_a": aplica_a, "nome": nome, "arquivo_nome": arquivo_nome,
+               "tipo": tipo, "texto": texto, "tem_docx": docx is not None, "docx": docx,
+               "criado_em": agora()}
+        anterior = await self.modelos_escritorio.find_one_and_replace(
+            {"user_id": user_id, "aplica_a": aplica_a}, doc, projection={"_id": 1})
+        if anterior:
+            doc["_id"] = anterior["_id"]
+        else:
+            doc["_id"] = ObjectId()
+            await self.modelos_escritorio.insert_one(doc)
+        return self._modelo({k: v for k, v in doc.items() if k not in ("texto", "docx")})
+
+    async def listar_modelos_escritorio(self, user_id: str) -> List[Dict[str, Any]]:
+        cursor = self.modelos_escritorio.find({"user_id": user_id}, {"texto": 0, "docx": 0}).sort("criado_em", DESCENDING)
+        return [self._modelo(d) for d in await cursor.to_list(length=200)]
+
+    async def contar_modelos_escritorio(self, user_id: str) -> int:
+        return await self.modelos_escritorio.count_documents({"user_id": user_id})
+
+    async def excluir_modelo_escritorio(self, user_id: str, modelo_id: str) -> bool:
+        if not ObjectId.is_valid(modelo_id):
+            return False
+        r = await self.modelos_escritorio.delete_one({"_id": ObjectId(modelo_id), "user_id": user_id})
+        return r.deleted_count == 1
+
+    async def obter_modelo_escritorio(self, user_id: str, modelo_id: str) -> Optional[Dict[str, Any]]:
+        if not ObjectId.is_valid(str(modelo_id)):
+            return None
+        doc = await self.modelos_escritorio.find_one({"_id": ObjectId(str(modelo_id)), "user_id": user_id})
+        return self._modelo(doc) if doc else None
+
+    async def modelo_escritorio_para(self, user_id: str, modelo_peca_id: str) -> Optional[Dict[str, Any]]:
+        """O modelo da peça escolhida; sem ele, o de todas as peças; senão None."""
+        for escopo in (modelo_peca_id, "todas"):
+            doc = await self.modelos_escritorio.find_one({"user_id": user_id, "aplica_a": escopo})
+            if doc:
+                return self._modelo(doc)
+        return None
