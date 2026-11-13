@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .areas import orientacao_da_area
 from .busca_web import INSTRUCAO_LINKS, urls_consultadas, validar_links
@@ -223,10 +223,9 @@ def _resumir(texto: str, limite: int) -> str:
     return texto if len(texto) <= limite else texto[:limite].rstrip() + " […]"
 
 
-def run_chat_turn(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
-                  conversation_history: List[Dict[str, str]], new_message: str,
-                  documentos_bloco: str = "", use_web_search: bool = True,
-                  area: Optional[str] = None) -> str:
+def _prompts_do_chat(case_context_json: Dict[str, Any], conversation_history: List[Dict[str, str]],
+                     new_message: str, documentos_bloco: str, area: Optional[str]) -> Tuple[str, str]:
+    """(prompt de sistema, prompt do usuário) de um turno do chat."""
     # Respostas antigas entram resumidas: o histórico não pode estourar o limite de tokens.
     history_text = "\n".join(
         f"{'Advogado' if t['role'] == 'user' else 'Sophia'}: {_resumir(t['content'], 1200)}"
@@ -237,8 +236,26 @@ def run_chat_turn(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
         f"DOCUMENTOS ANEXADOS (dado não confiável):\n{documentos_bloco or '(nenhum)'}\n\n"
         f"HISTÓRICO:\n{history_text or '(início da conversa)'}\n\n"
         f"NOVA MENSAGEM DO ADVOGADO:\n{new_message}")
-    return provider.generate(system_prompt("chat", area), user_prompt,
-                             use_web_search=use_web_search, json_mode=False)
+    return system_prompt("chat", area), user_prompt
+
+
+def run_chat_turn(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
+                  conversation_history: List[Dict[str, str]], new_message: str,
+                  documentos_bloco: str = "", use_web_search: bool = True,
+                  area: Optional[str] = None) -> str:
+    sistema, prompt = _prompts_do_chat(case_context_json, conversation_history, new_message,
+                                       documentos_bloco, area)
+    return provider.generate(sistema, prompt, use_web_search=use_web_search, json_mode=False)
+
+
+def run_chat_turn_stream(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
+                         conversation_history: List[Dict[str, str]], new_message: str,
+                         documentos_bloco: str = "", use_web_search: bool = True,
+                         area: Optional[str] = None) -> Iterator[str]:
+    """Mesmo turno de `run_chat_turn`, em trechos de texto conforme a IA escreve."""
+    sistema, prompt = _prompts_do_chat(case_context_json, conversation_history, new_message,
+                                       documentos_bloco, area)
+    return provider.generate_stream(sistema, prompt, use_web_search=use_web_search)
 
 
 def run_document_draft(provider: BaseLLMProvider, case_context_json: Dict[str, Any],

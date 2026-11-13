@@ -1236,6 +1236,41 @@ async def anexar_documento(
     return {**resposta, "texto": extraido.text}
 
 
+@app.delete("/casos/{caso_id}/documentos/{documento_id}")
+async def excluir_documento(caso_id: str, documento_id: str, user_id: str = ""):
+    """Tira do caso um documento anexado por engano: sai do repositório e do contexto da IA.
+
+    As análises já geradas continuam no histórico; a próxima não considera mais o arquivo.
+    """
+    user_id, documento_id = user_id.strip(), documento_id.strip()
+    if not user_id or not documento_id:
+        return JSONResponse({"erro": "Informe o usuário e o documento."}, status_code=400)
+    momento = agora_iso()
+    try:
+        if case_collection is not None:
+            resultado = await case_collection.update_one(
+                {"$and": [_filtro_caso(user_id, caso_id), {"documents.id": documento_id}]},
+                {"$pull": {"documents": {"id": documento_id}}, "$set": {"updated_at": momento}},
+            )
+            if resultado.matched_count == 0:
+                return JSONResponse({"erro": "Documento não encontrado."}, status_code=404)
+        else:
+            lista = _ler_cases_arquivo()
+            caso = next(
+                (item for item in lista if item.get("user_id") == user_id and _mesmo_caso(item, caso_id)), None
+            )
+            documentos = (caso or {}).get("documents") or []
+            restantes = [item for item in documentos if item.get("id") != documento_id]
+            if not caso or len(restantes) == len(documentos):
+                return JSONResponse({"erro": "Documento não encontrado."}, status_code=404)
+            caso["documents"] = restantes
+            caso["updated_at"] = momento
+            _gravar_cases_arquivo(lista)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"erro": str(exc)}, status_code=500)
+    return Response(status_code=204)
+
+
 # ---------------------------------------------------------------------------
 # Análise preliminar, chat e minutas (módulo `analise`)
 # ---------------------------------------------------------------------------
