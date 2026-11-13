@@ -14,14 +14,15 @@ Os SDKs/HTTP de IA são bloqueantes: rodam em thread pool (run_in_threadpool).
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from fastapi import APIRouter
-from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, Response
+from fastapi.concurrency import iterate_in_threadpool, run_in_threadpool
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from .analysis import run_case_analysis, run_chat_turn, run_document_draft
+from .analysis import run_case_analysis, run_chat_turn, run_chat_turn_stream, run_document_draft
 from .areas import AREAS, area_front, normalizar_area
 from .contexto import bloco_dos_documentos, fontes_para_salvar, material_para_analise, texto_dos_relatos
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
@@ -65,6 +66,11 @@ class PecaIn(BaseModel):
 
 def _erro(msg: str, status: int) -> JSONResponse:
     return JSONResponse({"erro": msg}, status_code=status)
+
+
+def _evento(dados: Dict[str, Any]) -> str:
+    """Uma linha do stream NDJSON do chat."""
+    return json.dumps(dados, ensure_ascii=False) + "\n"
 
 
 def _resumo_do_caso(ctx: Dict[str, Any]) -> Dict[str, Any]:
@@ -190,35 +196,82 @@ def criar_router(obter_contexto: ObterContexto,
         mensagens = await arm.listar_mensagens(user_id.strip(), caso_id)
         return {"mensagens": [mensagem_front(m) for m in mensagens]}
 
-    @router.post("/chat/{caso_id}")
-    async def enviar_mensagem(caso_id: str, body: ChatIn):
+    async def _turno_do_chat(caso_id: str, body: ChatIn):
+        """((arm, user_id, mensagem, argumentos do turno), None) ou (None, resposta de erro)."""
         user_id, mensagem = body.user_id.strip(), body.mensagem.strip()[:4000]
         arm, ctx, erro = await _preparar(user_id, caso_id)
         if erro:
-            return erro
+            return None, erro
         if not mensagem:
-            return _erro("Digite uma mensagem.", 400)
+            return None, _erro("Digite uma mensagem.", 400)
         ultima = await arm.ultima_analise(user_id, caso_id)
         relato = texto_dos_relatos(ctx["relatos"], LIMITE_RELATO_CHAT)
         if not ultima and not relato:
-            return _erro("Registre o relato do caso antes de conversar com a IA.", 404)
+            return None, _erro("Registre o relato do caso antes de conversar com a IA.", 404)
         historico = await arm.listar_mensagens(user_id, caso_id, JANELA_CHAT)
         contexto = {"caso": _resumo_do_caso(ctx), "analise": ultima["analise"] if ultima else None,
                     "relato": relato}
         documentos_bloco, _meta = bloco_dos_documentos(ctx["documentos"])
+        argumentos = dict(
+            case_context_json=contexto,
+            conversation_history=[{"role": m["papel"], "content": m["conteudo"]} for m in historico],
+            new_message=mensagem, documentos_bloco=documentos_bloco, area=_area_do_caso(ctx))
+        return (arm, user_id, mensagem, argumentos), None
+
+    @router.post("/chat/{caso_id}")
+    async def enviar_mensagem(caso_id: str, body: ChatIn):
+        turno, erro = await _turno_do_chat(caso_id, body)
+        if erro:
+            return erro
+        arm, user_id, mensagem, argumentos = turno
         provider = None
         try:
             provider = provider_do_servidor()
-            resposta = await run_in_threadpool(
-                run_chat_turn, provider, contexto,
-                [{"role": m["papel"], "content": m["conteudo"]} for m in historico],
-                mensagem, documentos_bloco, area=_area_do_caso(ctx))
+            resposta = await run_in_threadpool(lambda: run_chat_turn(provider, **argumentos))
         except LLMError as e:
             return _erro(str(e), 502)
         finally:
             await _registrar(arm, user_id, caso_id, "chat", provider)
         novas = await arm.adicionar_mensagens(user_id, caso_id, [("user", mensagem), ("assistant", resposta)])
         return {"mensagens": [mensagem_front(m) for m in novas]}
+
+    @router.post("/chat/{caso_id}/stream")
+    async def enviar_mensagem_ao_vivo(caso_id: str, body: ChatIn):
+        """
+        Mesma conversa de POST /chat, mas a resposta chega enquanto a IA escreve. Uma linha JSON por
+        evento (NDJSON): {"tipo": "trecho", "texto"} várias vezes, depois {"tipo": "fim", "mensagens"}
+        com as duas mensagens já gravadas, ou {"tipo": "erro", "erro"}. Só grava se a resposta terminar.
+        """
+        turno, erro = await _turno_do_chat(caso_id, body)
+        if erro:
+            return erro
+        arm, user_id, mensagem, argumentos = turno
+        try:
+            provider = provider_do_servidor()
+        except LLMError as e:
+            return _erro(str(e), 502)
+
+        async def eventos():
+            partes = []
+            try:
+                async for trecho in iterate_in_threadpool(run_chat_turn_stream(provider, **argumentos)):
+                    partes.append(trecho)
+                    yield _evento({"tipo": "trecho", "texto": trecho})
+                resposta = "".join(partes).strip()
+                if not resposta:
+                    raise LLMError("A IA não respondeu. Tente de novo.")
+                novas = await arm.adicionar_mensagens(
+                    user_id, caso_id, [("user", mensagem), ("assistant", resposta)])
+                yield _evento({"tipo": "fim", "mensagens": [mensagem_front(m) for m in novas]})
+            except LLMError as e:
+                yield _evento({"tipo": "erro", "erro": str(e)})
+            except Exception:  # noqa: BLE001 — o stream já começou: o erro vai como evento, não como 500
+                yield _evento({"tipo": "erro", "erro": "Não foi possível concluir a resposta. Tente de novo."})
+            finally:
+                await _registrar(arm, user_id, caso_id, "chat", provider)
+
+        return StreamingResponse(eventos(), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # ------------------------------------------------------------ áreas
     @router.get("/areas")
@@ -258,6 +311,15 @@ def criar_router(obter_contexto: ObterContexto,
         if not peca:
             return _erro("Minuta não encontrada.", 404)
         return {"peca": peca_front(peca)}
+
+    @router.delete("/pecas/{caso_id}/{peca_id}")
+    async def excluir_peca(caso_id: str, peca_id: str, user_id: str = ""):
+        arm, _ctx, erro = await _preparar(user_id, caso_id)
+        if erro:
+            return erro
+        if not await arm.excluir_peca(user_id.strip(), caso_id, peca_id):
+            return _erro("Minuta não encontrada.", 404)
+        return {"ok": True}
 
     @router.get("/pecas/{caso_id}/{peca_id}/docx")
     async def baixar_peca(caso_id: str, peca_id: str, user_id: str = ""):

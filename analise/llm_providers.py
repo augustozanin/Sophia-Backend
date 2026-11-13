@@ -6,10 +6,12 @@ pois os provedores descontinuam modelos com frequência.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
 from abc import ABC, abstractmethod
+from typing import Iterator
 
 from .busca_web import dominios_da_busca
 
@@ -71,20 +73,81 @@ class BaseLLMProvider(ABC):
                  use_web_search: bool = True, json_mode: bool = False) -> str:
         """Retorna texto. json_mode=True só na análise inicial (resposta JSON)."""
 
+    def generate_stream(self, system_prompt: str, user_prompt: str,
+                        use_web_search: bool = True) -> Iterator[str]:
+        """
+        Texto em trechos, conforme a IA escreve (chat). Provedor sem streaming aqui entrega a
+        resposta inteira num trecho só; quem consome não precisa saber a diferença.
+        """
+        yield self.generate(system_prompt, user_prompt, use_web_search=use_web_search, json_mode=False)
+
 
 class OpenAIProvider(BaseLLMProvider):
     name = "openai"
     env_var = "SOPHIA_MODEL_OPENAI"
     fallback_model = "gpt-4.1"
 
-    def generate(self, system_prompt, user_prompt, use_web_search=True, json_mode=False):
+    def _cliente(self):
         try:
             from openai import OpenAI
         except ImportError as e:
             raise LLMError("Pacote 'openai' não instalado (pip install openai).") from e
-        client = OpenAI(api_key=self.api_key)
-        kwargs = dict(model=self.model, instructions=system_prompt, input=user_prompt)
+        return OpenAI(api_key=self.api_key)
+
+    def generate(self, system_prompt, user_prompt, use_web_search=True, json_mode=False):
+        client = self._cliente()
+        kwargs = self._parametros(system_prompt, user_prompt, use_web_search, json_mode)
         self.fontes_web = []
+        try:
+            resp = client.responses.create(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            raise LLMError(f"Falha ao chamar a OpenAI: {e}") from e
+        self._registrar_resposta(resp)
+        return resp.output_text or ""
+
+    def generate_stream(self, system_prompt, user_prompt, use_web_search=True):
+        client = self._cliente()
+        kwargs = self._parametros(system_prompt, user_prompt, use_web_search, False)
+        self.fontes_web = []
+        try:
+            for evento in client.responses.create(**kwargs, stream=True):
+                tipo = _campo(evento, "type")
+                if tipo == "response.output_text.delta":
+                    trecho = _campo(evento, "delta") or ""
+                    if trecho:
+                        yield trecho
+                elif tipo in ("response.completed", "response.incomplete"):
+                    self._registrar_resposta(_campo(evento, "response"))
+                elif tipo == "response.failed":
+                    falha = _campo(_campo(evento, "response"), "error")
+                    raise LLMError(f"Falha ao chamar a OpenAI: {_campo(falha, 'message') or 'resposta interrompida'}")
+                elif tipo == "error":
+                    raise LLMError(f"Falha ao chamar a OpenAI: {_campo(evento, 'message') or 'erro no stream'}")
+        except LLMError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise LLMError(f"Falha ao chamar a OpenAI: {e}") from e
+
+    def _registrar_resposta(self, resp) -> None:
+        """Tokens gastos e páginas consultadas de uma resposta completa."""
+        if resp is None:
+            return
+        uso = _campo(resp, "usage")
+        if uso is not None:
+            entrada_det = _campo(uso, "input_tokens_details")
+            saida_det = _campo(uso, "output_tokens_details")
+            self._somar_uso(
+                entrada=_campo(uso, "input_tokens", 0),
+                entrada_cache=_campo(entrada_det, "cached_tokens", 0) if entrada_det else 0,
+                saida=_campo(uso, "output_tokens", 0),
+                raciocinio=_campo(saida_det, "reasoning_tokens", 0) if saida_det else 0,
+                buscas=sum(1 for item in (_campo(resp, "output") or [])
+                           if _campo(item, "type") == "web_search_call"),
+            )
+        self.fontes_web = _urls_da_resposta(resp)
+
+    def _parametros(self, system_prompt, user_prompt, use_web_search, json_mode) -> dict:
+        kwargs = dict(model=self.model, instructions=system_prompt, input=user_prompt)
         if self.busca_ativa(use_web_search):
             kwargs["tools"] = [{
                 "type": "web_search",
@@ -101,24 +164,7 @@ class OpenAIProvider(BaseLLMProvider):
         if esforco:
             # Modelos de raciocínio (ex.: gpt-6-luna): none, low, medium, high...
             kwargs["reasoning"] = {"effort": esforco}
-        try:
-            resp = client.responses.create(**kwargs)
-        except Exception as e:  # noqa: BLE001
-            raise LLMError(f"Falha ao chamar a OpenAI: {e}") from e
-        uso = getattr(resp, "usage", None)
-        if uso is not None:
-            entrada_det = getattr(uso, "input_tokens_details", None)
-            saida_det = getattr(uso, "output_tokens_details", None)
-            self._somar_uso(
-                entrada=getattr(uso, "input_tokens", 0),
-                entrada_cache=getattr(entrada_det, "cached_tokens", 0) if entrada_det else 0,
-                saida=getattr(uso, "output_tokens", 0),
-                raciocinio=getattr(saida_det, "reasoning_tokens", 0) if saida_det else 0,
-                buscas=sum(1 for item in (_campo(resp, "output") or [])
-                           if _campo(item, "type") == "web_search_call"),
-            )
-        self.fontes_web = _urls_da_resposta(resp)
-        return resp.output_text or ""
+        return kwargs
 
     def busca_ativa(self, use_web_search: bool = True) -> bool:
         return bool(use_web_search) and busca_web_ligada()
@@ -225,15 +271,61 @@ class GroqProvider(BaseLLMProvider):
             if r.status_code != 200:
                 raise LLMError(f"Groq retornou status {r.status_code}: {r.text[:300]}")
             dados = r.json()
-            uso = dados.get("usage") or {}
-            self._somar_uso(
-                entrada=uso.get("prompt_tokens", 0),
-                entrada_cache=(uso.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
-                saida=uso.get("completion_tokens", 0),
-                raciocinio=(uso.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
-            )
+            self._somar_uso_groq(dados.get("usage") or {})
             return dados["choices"][0]["message"]["content"] or ""
         raise LLMError("A IA não respondeu. Tente de novo.")
+
+    def generate_stream(self, system_prompt, user_prompt, use_web_search=True):
+        import httpx
+
+        body = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user_prompt}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        for tentativa in range(self.TENTATIVAS_LIMITE):
+            try:
+                with httpx.stream("POST", self.URL, json=body, timeout=120.0,
+                                  headers={"Authorization": f"Bearer {self.api_key}"}) as r:
+                    if r.status_code != 200:
+                        r.read()
+                        if r.status_code == 429 and tentativa < self.TENTATIVAS_LIMITE - 1:
+                            # O limite chega antes do primeiro trecho: dá para esperar e repetir.
+                            time.sleep(self._espera(r))
+                            continue
+                        if r.status_code == 429:
+                            raise LLMError("A IA atingiu o limite de uso por minuto. "
+                                           "Aguarde alguns segundos e tente de novo.")
+                        raise LLMError(f"Groq retornou status {r.status_code}: {r.text[:300]}")
+                    for linha in r.iter_lines():
+                        if not linha.startswith("data:"):
+                            continue
+                        dado = linha[5:].strip()
+                        if dado == "[DONE]":
+                            break
+                        pedaco = json.loads(dado)
+                        self._somar_uso_groq(pedaco.get("usage") or (pedaco.get("x_groq") or {}).get("usage"))
+                        for escolha in pedaco.get("choices") or []:
+                            trecho = (escolha.get("delta") or {}).get("content")
+                            if trecho:
+                                yield trecho
+                    return
+            except httpx.HTTPError as e:
+                raise LLMError(f"Falha ao chamar o Groq: {e}") from e
+        raise LLMError("A IA não respondeu. Tente de novo.")
+
+    def _somar_uso_groq(self, uso) -> None:
+        """Uso de uma chamada. No stream só o último pedaço traz o uso; os demais vêm sem (None)."""
+        if uso is None:
+            return
+        self._somar_uso(
+            entrada=uso.get("prompt_tokens", 0),
+            entrada_cache=(uso.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+            saida=uso.get("completion_tokens", 0),
+            raciocinio=(uso.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
+        )
 
     TENTATIVAS_LIMITE = 3
     ESPERA_MAXIMA = 20.0

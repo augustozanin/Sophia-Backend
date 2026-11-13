@@ -159,6 +159,13 @@ class Armazenamento:
         doc = await self.pecas.find_one({"_id": ObjectId(peca_id), "user_id": user_id, "caso_id": caso_id})
         return self._peca(doc) if doc else None
 
+    async def excluir_peca(self, user_id: str, caso_id: str, peca_id: str) -> bool:
+        """Apaga a minuta do banco. False quando ela não existe ou é de outro usuário/caso."""
+        if not ObjectId.is_valid(peca_id):
+            return False
+        r = await self.pecas.delete_one({"_id": ObjectId(peca_id), "user_id": user_id, "caso_id": caso_id})
+        return r.deleted_count > 0
+
     # ------------------------------------------------------------ consumo de IA
     async def registrar_consumo(self, user_id: str, caso_id: str, tarefa: str, provedor: str,
                                 modelo: str, uso: Dict[str, Any]) -> None:

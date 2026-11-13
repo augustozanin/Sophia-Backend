@@ -110,6 +110,13 @@ class _Colecao:
             cursor.sort(sort)
         return cursor.docs[0] if cursor.docs else None
 
+    async def delete_one(self, filtro):
+        for i, d in enumerate(self.docs):
+            if self._bate(d, filtro):
+                del self.docs[i]
+                return _Obj(deleted_count=1)
+        return _Obj(deleted_count=0)
+
 
 class _Banco(dict):
     def __getitem__(self, nome):
@@ -907,6 +914,192 @@ class Minuta(unittest.TestCase):
             "MINUTA PARA REVISÃO HUMANA\nEXCELENTÍSSIMO SENHOR JUIZ\nDOS FATOS\nTexto.\na) pedido")
         textos = [p.text for p in docx.Document(_io.BytesIO(arquivo)).paragraphs]
         self.assertEqual(textos, ["EXCELENTÍSSIMO SENHOR JUIZ", "DOS FATOS", "Texto.", "a)\tpedido"])
+
+
+class FalsoAoVivo(Falso):
+    """IA falsa que escreve em trechos; `falhar_depois` interrompe o stream no meio."""
+
+    def __init__(self, trechos, falhar_depois=None):
+        super().__init__([])
+        self.trechos, self.falhar_depois = trechos, falhar_depois
+
+    def generate_stream(self, system_prompt, user_prompt, use_web_search=True):
+        self.prompts.append(user_prompt)
+        for i, trecho in enumerate(self.trechos):
+            if self.falhar_depois is not None and i == self.falhar_depois:
+                raise LLMError("A IA caiu no meio.")
+            self._somar_uso(entrada=1, saida=1)
+            yield trecho
+
+
+def _eventos(resposta):
+    return [json.loads(linha) for linha in resposta.text.splitlines() if linha.strip()]
+
+
+class ChatAoVivoEExcluirMinuta(unittest.TestCase):
+    def setUp(self):
+        self.arm = Armazenamento(_Banco())
+        self.casos = {("A", "c1"): {"titulo": "Caso", "cliente": "Ana", "area": "civil", "documentos": [],
+                                    "relatos": [{"texto": "relato do cliente", "criado_em": "d1"}]}}
+
+        async def obter_contexto(user_id, caso_id):
+            return self.casos.get((user_id, caso_id))
+
+        async def marcar(*_):
+            return None
+
+        self.ia = FalsoAoVivo(["Faltam ", "os **holerites**", "."])
+        router.provider_do_servidor = lambda: self.ia
+        app = FastAPI()
+        app.include_router(router.criar_router(obter_contexto, lambda: self.arm, marcar))
+        self.c = TestClient(app)
+
+    def test_stream_manda_os_trechos_e_grava_a_conversa_no_fim(self):
+        r = self.c.post("/chat/c1/stream", json={"user_id": "A", "mensagem": "Que documentos faltam?"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.headers["content-type"].startswith("application/x-ndjson"))
+        eventos = _eventos(r)
+        self.assertEqual([e["texto"] for e in eventos if e["tipo"] == "trecho"], ["Faltam ", "os **holerites**", "."])
+        fim = eventos[-1]
+        self.assertEqual(fim["tipo"], "fim")
+        self.assertEqual([m["papel"] for m in fim["mensagens"]], ["advogado", "assistente"])
+        self.assertEqual(fim["mensagens"][1]["conteudo"], "Faltam os **holerites**.")
+        salvas = self.c.get("/chat/c1?user_id=A").json()["mensagens"]
+        self.assertEqual([m["conteudo"] for m in salvas], ["Que documentos faltam?", "Faltam os **holerites**."])
+        # Os tokens do stream entram no consumo, como no chat normal.
+        self.assertEqual(rodar(self.arm.listar_consumo("A", "c1"))[0]["tarefa"], "chat")
+
+    def test_stream_que_cai_no_meio_avisa_e_nao_grava_nada(self):
+        self.ia.falhar_depois = 1
+        eventos = _eventos(self.c.post("/chat/c1/stream", json={"user_id": "A", "mensagem": "oi"}))
+        self.assertEqual(eventos[0], {"tipo": "trecho", "texto": "Faltam "})
+        self.assertEqual(eventos[-1], {"tipo": "erro", "erro": "A IA caiu no meio."})
+        self.assertEqual(self.c.get("/chat/c1?user_id=A").json()["mensagens"], [])
+
+    def test_stream_confere_o_dono_e_a_mensagem_antes_de_comecar(self):
+        self.assertEqual(self.c.post("/chat/c1/stream", json={"user_id": "B", "mensagem": "oi"}).status_code, 404)
+        self.assertEqual(self.c.post("/chat/c1/stream", json={"user_id": "A", "mensagem": "  "}).status_code, 400)
+
+    def test_provedor_sem_stream_entrega_a_resposta_inteira(self):
+        router.provider_do_servidor = lambda: Falso(["Resposta inteira"])
+        eventos = _eventos(self.c.post("/chat/c1/stream", json={"user_id": "A", "mensagem": "oi"}))
+        self.assertEqual([e["tipo"] for e in eventos], ["trecho", "fim"])
+        self.assertEqual(eventos[0]["texto"], "Resposta inteira")
+
+    def test_excluir_minuta_apaga_do_banco_e_so_do_dono(self):
+        modelo = modelos_pecas.obter_modelo("contestacao")
+        peca = rodar(self.arm.salvar_peca("A", "c1", modelo, "texto", None, 1))
+        self.assertEqual(self.c.delete(f"/pecas/c1/{peca['id']}?user_id=B").status_code, 404)
+        self.assertEqual(self.c.delete(f"/pecas/c1/{peca['id']}?user_id=A").json(), {"ok": True})
+        self.assertEqual(self.c.get("/pecas/c1?user_id=A").json()["pecas"], [])
+        self.assertEqual(self.c.get(f"/pecas/c1/{peca['id']}?user_id=A").status_code, 404)
+        self.assertEqual(self.c.delete(f"/pecas/c1/{peca['id']}?user_id=A").status_code, 404)
+        self.assertEqual(self.c.delete("/pecas/c1/nao-e-id?user_id=A").status_code, 404)
+
+
+class ExcluirDocumento(unittest.TestCase):
+    """DELETE /casos/{caso}/documentos/{doc} no modo sem Mongo (casos num arquivo)."""
+
+    def test_tira_so_o_documento_do_dono(self):
+        import main
+
+        casos = [{"user_id": "A", "caso_id": "c1", "documents": [{"id": "d1", "name": "errado.pdf"},
+                                                                 {"id": "d2", "name": "certo.pdf"}]}]
+        gravados = []
+        originais = main.case_collection, main._ler_cases_arquivo, main._gravar_cases_arquivo
+        main.case_collection = None
+        main._ler_cases_arquivo = lambda: casos
+        main._gravar_cases_arquivo = gravados.append
+        try:
+            c = TestClient(main.app)
+            self.assertEqual(c.delete("/casos/c1/documentos/d1?user_id=B").status_code, 404)
+            self.assertEqual(c.delete("/casos/c1/documentos/d1?user_id=A").status_code, 204)
+            self.assertEqual([d["id"] for d in casos[0]["documents"]], ["d2"])
+            self.assertEqual(len(gravados), 1)
+            self.assertEqual(c.delete("/casos/c1/documentos/d1?user_id=A").status_code, 404)
+            self.assertEqual(c.delete("/casos/c1/documentos/d2").status_code, 400)
+        finally:
+            main.case_collection, main._ler_cases_arquivo, main._gravar_cases_arquivo = originais
+
+
+class StreamDosProvedores(unittest.TestCase):
+    def test_openai_repassa_os_deltas_e_soma_o_uso_do_fim(self):
+        import sys as _sys
+        import types
+
+        from analise.llm_providers import OpenAIProvider
+
+        pedidos = []
+
+        class Respostas:
+            def create(self, **kwargs):
+                pedidos.append(kwargs)
+                uso = {"input_tokens": 90, "output_tokens": 12,
+                       "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {}}
+                return iter([
+                    {"type": "response.created"},
+                    {"type": "response.output_text.delta", "delta": "Olá, "},
+                    {"type": "response.output_text.delta", "delta": "doutora."},
+                    {"type": "response.completed", "response": {"usage": uso, "output": []}},
+                ])
+
+        falso = types.ModuleType("openai")
+        falso.OpenAI = lambda api_key: _Obj(responses=Respostas())
+        original = _sys.modules.get("openai")
+        _sys.modules["openai"] = falso
+        try:
+            with _Ambiente(SOPHIA_BUSCA_WEB=None, SOPHIA_RACIOCINIO_OPENAI=None, SOPHIA_MODEL_OPENAI=None):
+                provedor = OpenAIProvider("sk-teste")
+                trechos = list(provedor.generate_stream("s", "u"))
+                falhas = types.SimpleNamespace(create=lambda **k: iter([
+                    {"type": "response.output_text.delta", "delta": "a"},
+                    {"type": "response.failed", "response": {"error": {"message": "sem crédito"}}}]))
+                falso.OpenAI = lambda api_key: _Obj(responses=falhas)
+                with self.assertRaises(LLMError) as erro:
+                    list(OpenAIProvider("sk-teste").generate_stream("s", "u"))
+        finally:
+            if original is None:
+                _sys.modules.pop("openai", None)
+            else:
+                _sys.modules["openai"] = original
+        self.assertEqual(trechos, ["Olá, ", "doutora."])
+        self.assertIs(pedidos[0]["stream"], True)
+        self.assertNotIn("text", pedidos[0])  # o chat é texto livre, nunca JSON forçado
+        self.assertEqual(provedor.tirar_consumo()["entrada"], 90)
+        self.assertIn("sem crédito", str(erro.exception))
+
+    def test_groq_le_o_sse_e_o_uso_do_ultimo_pedaco(self):
+        import contextlib
+
+        import httpx
+
+        from analise import llm_providers
+
+        linhas = [
+            'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+            "",
+            'data: {"choices":[{"delta":{"content":"Bom "}}]}',
+            'data: {"choices":[{"delta":{"content":"dia"}}]}',
+            'data: {"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":3}}',
+            "data: [DONE]",
+        ]
+        pedidos = []
+
+        @contextlib.contextmanager
+        def stream_falso(metodo, url, **kwargs):
+            pedidos.append(kwargs["json"])
+            yield _Obj(status_code=200, iter_lines=lambda: iter(linhas))
+
+        original = httpx.stream
+        httpx.stream = stream_falso
+        try:
+            provedor = llm_providers.GroqProvider("gsk_x")
+            self.assertEqual(list(provedor.generate_stream("s", "u")), ["Bom ", "dia"])
+        finally:
+            httpx.stream = original
+        self.assertTrue(pedidos[0]["stream"])
+        uso = provedor.tirar_consumo()
+        self.assertEqual((uso["chamadas"], uso["entrada"], uso["saida"]), (1, 40, 3))
 
 
 if __name__ == "__main__":
