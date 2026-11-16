@@ -31,6 +31,7 @@ from analise.document_utils import extract_text
 from analise.llm_providers import LLMError, descricao_da_ia, nome_do_provedor, provider_do_servidor
 from analise.router import criar_router as criar_router_analise
 from analise.storage import Armazenamento
+from login_google import LoginGoogleIndisponivel, TokenGoogleInvalido, verificar_credencial
 from prazos.router import criar_router as criar_router_prazos
 from prazos.storage import ArmazenamentoPrazos
 
@@ -357,6 +358,16 @@ class EntrarRequest(BaseModel):
     senha: str
 
 
+class EntrarGoogleRequest(BaseModel):
+    # `credencial` é o ID token do botão do Google; `nonce` é o valor bruto do cookie httpOnly do Next.
+    credencial: str
+    nonce: str
+
+
+class VincularGoogleRequest(EntrarGoogleRequest):
+    senha: str
+
+
 class CartaoAssinatura(BaseModel):
     brand: str = ""
     last4: str = ""
@@ -559,6 +570,8 @@ async def cadastro(payload: CadastroRequest):
             {"erro": "A senha deve ter pelo menos 8 caracteres."},
             status_code=400,
         )
+    if len(senha.encode("utf-8")) > LIMITE_BCRYPT:
+        return JSONResponse({"erro": "A senha pode ter no máximo 72 caracteres."}, status_code=400)
 
     try:
         if users_collection is not None:
@@ -570,6 +583,10 @@ async def cadastro(payload: CadastroRequest):
             return JSONResponse({"erro": MENSAGEM_BANCO_INDISPONIVEL}, status_code=503)
         raise
     if existente:
+        if existente.get("google_sub") and not existente.get("password_hash"):
+            return JSONResponse(
+                {"erro": "Já existe uma conta com este email. Entre com o Google."}, status_code=400
+            )
         return JSONResponse({"erro": "Já existe uma conta com este email."}, status_code=400)
 
     user_id = str(uuid.uuid4())
@@ -618,11 +635,186 @@ async def entrar(payload: EntrarRequest):
     if not documento:
         return JSONResponse({"erro": "Email ou senha inválidos."}, status_code=401)
 
-    hash_salvo = (documento.get("password_hash") or "").encode("utf-8")
-    if not hash_salvo or not bcrypt.checkpw(senha.encode("utf-8"), hash_salvo):
+    if documento.get("google_sub") and not documento.get("password_hash"):
+        return JSONResponse(
+            {"erro": "Esta conta entra com o Google. Use o botão do Google abaixo."}, status_code=401
+        )
+    if not _senha_confere(senha, documento):
         return JSONResponse({"erro": "Email ou senha inválidos."}, status_code=401)
 
     return {"usuario": usuario_publico(documento)}
+
+
+# O bcrypt só usa os primeiros 72 bytes e, na versão 5, recusa senha maior com erro.
+LIMITE_BCRYPT = 72
+
+
+def _senha_confere(senha: str, documento: dict) -> bool:
+    hash_salvo = (documento.get("password_hash") or "").encode("utf-8")
+    if not senha or not hash_salvo:
+        return False
+    try:
+        return bcrypt.checkpw(senha.encode("utf-8"), hash_salvo)
+    except ValueError:
+        # Senha acima de 72 bytes ou hash corrompido: não confere (antes virava erro 500).
+        return False
+
+
+# --- Login com Google -------------------------------------------------------------------------
+# O token é conferido aqui (login_google.py), nunca só no navegador. Uma conta que já tem senha
+# só é ligada ao Google depois de a pessoa confirmar a senha: sem isso, quem cadastrou de
+# propósito o email de outra pessoa ganharia acesso aos casos dela quando ela entrasse com o Google.
+
+MENSAGEM_GOOGLE_FALHOU = "Não foi possível confirmar o login com o Google. Tente de novo."
+MENSAGEM_GOOGLE_DESLIGADO = "O login com Google ainda não está disponível."
+MENSAGEM_GOOGLE_OUTRA_CONTA = "Este email já está ligado a outra conta Google."
+
+
+async def _usuario_por(campo: str, valor: str) -> dict | None:
+    if users_collection is not None:
+        return await users_collection.find_one({campo: valor})
+    return next((u for u in _ler_users_arquivo() if u.get(campo) == valor), None)
+
+
+async def _google_conferido(payload: EntrarGoogleRequest) -> dict | JSONResponse:
+    try:
+        return await verificar_credencial(payload.credencial, payload.nonce)
+    except LoginGoogleIndisponivel:
+        return JSONResponse({"erro": MENSAGEM_GOOGLE_DESLIGADO}, status_code=503)
+    except TokenGoogleInvalido:
+        return JSONResponse({"erro": MENSAGEM_GOOGLE_FALHOU, "codigo": "token_invalido"}, status_code=401)
+
+
+async def _garantir_indices_google() -> None:
+    if users_collection is not None:
+        await users_collection.create_index("email", unique=True)
+        # sparse: contas sem Google não entram no índice.
+        await users_collection.create_index("google_sub", unique=True, sparse=True)
+
+
+@app.post("/entrar/google")
+async def entrar_com_google(payload: EntrarGoogleRequest):
+    """Entra com o Google; sem conta para o email, cria uma (os termos são aceitos depois, no front)."""
+    google = await _google_conferido(payload)
+    if isinstance(google, JSONResponse):
+        return google
+
+    try:
+        documento = await _usuario_por("google_sub", google["sub"])
+        existente = None if documento else await _usuario_por("email", google["email"])
+    except Exception as exc:  # noqa: BLE001
+        if _banco_indisponivel(exc):
+            return JSONResponse({"erro": MENSAGEM_BANCO_INDISPONIVEL}, status_code=503)
+        raise
+    if documento:
+        return {"usuario": usuario_publico(documento)}
+
+    if existente:
+        if existente.get("google_sub"):
+            return JSONResponse({"erro": MENSAGEM_GOOGLE_OUTRA_CONTA}, status_code=409)
+        if existente.get("password_hash"):
+            return JSONResponse(
+                {
+                    "erro": "Já existe uma conta Sophia com este email. Digite a senha dela uma vez para ligar o Google.",
+                    "codigo": "vincular_conta",
+                    "email": google["email"],
+                },
+                status_code=409,
+            )
+
+    agora = agora_iso()
+    if existente:
+        # Conta sem senha e sem Google não consegue entrar de jeito nenhum; o Google prova o email.
+        documento = existente
+        campos = {"google_sub": google["sub"], "google_linked_at": agora, "updated_at": agora}
+    else:
+        documento = {
+            "_id": str(uuid.uuid4()),
+            "name": google["nome"] or google["email"].split("@")[0],
+            "email": google["email"],
+            "google_sub": google["sub"],
+            "google_linked_at": agora,
+            "account_active": True,
+            "created_at": agora,
+        }
+    try:
+        await _garantir_indices_google()
+        if existente:
+            await _atualizar_usuario(documento["_id"], campos)
+            documento.update(campos)
+        elif users_collection is not None:
+            await users_collection.insert_one(documento)
+        else:
+            lista = _ler_users_arquivo()
+            lista.append(documento)
+            _gravar_users_arquivo(lista)
+    except Exception as exc:  # noqa: BLE001
+        if "duplicate" in str(exc).lower():
+            # Dois cliques quase juntos: a outra requisição já criou a conta.
+            criado = await _usuario_por("google_sub", google["sub"])
+            if criado:
+                return {"usuario": usuario_publico(criado)}
+            return JSONResponse({"erro": "Já existe uma conta com este email."}, status_code=409)
+        if _banco_indisponivel(exc):
+            return JSONResponse({"erro": MENSAGEM_BANCO_INDISPONIVEL}, status_code=503)
+        return JSONResponse({"erro": "Não foi possível entrar com o Google agora."}, status_code=500)
+
+    return {"usuario": usuario_publico(documento), "conta_nova": not existente}
+
+
+@app.post("/entrar/google/vincular")
+async def vincular_google(payload: VincularGoogleRequest):
+    """Liga o Google a uma conta com senha. Exige as duas provas: o token do Google e a senha."""
+    google = await _google_conferido(payload)
+    if isinstance(google, JSONResponse):
+        return google
+
+    try:
+        existente = await _usuario_por("email", google["email"])
+        outra = await _usuario_por("google_sub", google["sub"])
+    except Exception as exc:  # noqa: BLE001
+        if _banco_indisponivel(exc):
+            return JSONResponse({"erro": MENSAGEM_BANCO_INDISPONIVEL}, status_code=503)
+        raise
+    if not existente or not existente.get("password_hash"):
+        return JSONResponse({"erro": "Não há conta com senha para este email."}, status_code=400)
+    ligado = existente.get("google_sub")
+    if ligado and ligado != google["sub"]:
+        return JSONResponse({"erro": MENSAGEM_GOOGLE_OUTRA_CONTA}, status_code=409)
+    if outra and outra["_id"] != existente["_id"]:
+        return JSONResponse(
+            {"erro": "Esta conta Google já está ligada a outra conta Sophia."}, status_code=409
+        )
+    if not _senha_confere(payload.senha, existente):
+        return JSONResponse({"erro": "Senha incorreta."}, status_code=401)
+
+    if not ligado:
+        agora = agora_iso()
+        campos = {"google_sub": google["sub"], "google_linked_at": agora, "updated_at": agora}
+        try:
+            await _garantir_indices_google()
+            await _atualizar_usuario(existente["_id"], campos)
+        except Exception as exc:  # noqa: BLE001
+            if "duplicate" in str(exc).lower():
+                return JSONResponse(
+                    {"erro": "Esta conta Google já está ligada a outra conta Sophia."}, status_code=409
+                )
+            if _banco_indisponivel(exc):
+                return JSONResponse({"erro": MENSAGEM_BANCO_INDISPONIVEL}, status_code=503)
+            return JSONResponse({"erro": "Não foi possível ligar o Google agora."}, status_code=500)
+        existente.update(campos)
+    return {"usuario": usuario_publico(existente)}
+
+
+async def _atualizar_usuario(user_id: str, campos: dict) -> None:
+    if users_collection is not None:
+        await users_collection.update_one({"_id": user_id}, {"$set": campos})
+        return
+    usuarios = _ler_users_arquivo()
+    for item in usuarios:
+        if item.get("_id") == user_id:
+            item.update(campos)
+    _gravar_users_arquivo(usuarios)
 
 
 async def _buscar_usuario(user_id: str) -> dict | None:
