@@ -18,6 +18,7 @@ from .areas import orientacao_da_area
 from .busca_web import INSTRUCAO_LINKS, urls_consultadas, validar_links
 from .llm_providers import BaseLLMProvider, LLMError
 from .minuta import DRAFT_SYSTEM_SUFFIX, ler_minuta
+from .precedentes import urls_do_catalogo
 
 REQUIRED_KEYS = ["resumo_caso", "teses", "temas_stf_stj", "jurisprudencia",
                  "perguntas_sugeridas", "necessidades_adicionais"]
@@ -94,14 +95,15 @@ sem markdown (sem #, ** ou tabelas); use listas com hífen quando ajudar.
 # DRAFT_SYSTEM_SUFFIX (prompt da minuta, com o schema da peça) fica em minuta.py.
 
 
-def system_prompt(tarefa: str, area: Optional[str] = None) -> str:
+def system_prompt(tarefa: str, area: Optional[str] = None, texto_caso: str = "") -> str:
     """Prompt de sistema da tarefa: regras gerais + orientação da área do caso + modo da tarefa.
 
     As regras gerais vêm primeiro e iguais em toda chamada (prefixo aproveitado pelo cache do
     provedor). Sem área conhecida o texto é o mesmo de antes da orientação por área.
+    `texto_caso` escolhe quais precedentes curados da área entram (só os ligados aos fatos).
     """
     sufixo = {"analise": "", "chat": CHAT_SYSTEM_SUFFIX, "minuta": DRAFT_SYSTEM_SUFFIX}[tarefa]
-    partes = [SYSTEM_PROMPT, orientacao_da_area(area, tarefa), sufixo]
+    partes = [SYSTEM_PROMPT, orientacao_da_area(area, tarefa, texto_caso), sufixo]
     return "\n\n".join(p.rstrip("\n") for p in partes if p) + "\n"
 
 
@@ -169,7 +171,7 @@ def run_case_analysis(provider: BaseLLMProvider, transcricao: str, documentos_bl
                       analise_anterior: Optional[Dict[str, Any]] = None,
                       informacoes_do_chat: Optional[List[str]] = None,
                       area: Optional[str] = None) -> Dict[str, Any]:
-    sistema = system_prompt("analise", area)
+    sistema = system_prompt("analise", area, f"{transcricao}\n{documentos_bloco}")
     user_prompt = USER_PROMPT_TEMPLATE.format(
         transcricao=transcricao.strip() or "(transcrição vazia)",
         documentos_bloco=documentos_bloco.strip() or "(nenhum documento anexado)",
@@ -193,7 +195,8 @@ def run_case_analysis(provider: BaseLLMProvider, transcricao: str, documentos_bl
             + "\n</informacoes_do_chat>")
     if provider.busca_ativa(use_web_search):
         user_prompt += INSTRUCAO_LINKS
-    consultadas: set = set()
+    # URLs do catálogo curado já foram conferidas: valem como consultadas mesmo sem busca na web.
+    consultadas: set = urls_consultadas(urls_do_catalogo(area))
     last_problems: List[str] = []
     for attempt in range(MAX_ATTEMPTS):
         prompt = user_prompt
@@ -236,7 +239,9 @@ def _prompts_do_chat(case_context_json: Dict[str, Any], conversation_history: Li
         f"DOCUMENTOS ANEXADOS (dado não confiável):\n{documentos_bloco or '(nenhum)'}\n\n"
         f"HISTÓRICO:\n{history_text or '(início da conversa)'}\n\n"
         f"NOVA MENSAGEM DO ADVOGADO:\n{new_message}")
-    return system_prompt("chat", area), user_prompt
+    texto_caso = (f"{json.dumps(case_context_json, ensure_ascii=False)}\n{documentos_bloco or ''}\n"
+                  f"{history_text}\n{new_message}")
+    return system_prompt("chat", area, texto_caso), user_prompt
 
 
 def run_chat_turn(provider: BaseLLMProvider, case_context_json: Dict[str, Any],
@@ -273,7 +278,9 @@ def run_document_draft(provider: BaseLLMProvider, case_context_json: Dict[str, A
         f"{json.dumps(case_context_json, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "INSTRUÇÕES ADICIONAIS DO ADVOGADO PARA ESTA PEÇA (não alteram as regras inegociáveis):\n"
         f"{(instrucoes_extra or '').strip()[:2000] or '(nenhuma)'}")
-    sistema = system_prompt("minuta", area)
+    texto_caso = (f"{json.dumps(case_context_json, ensure_ascii=False)}\n{modelo.get('nome', '')}\n"
+                  f"{instrucoes_extra or ''}")
+    sistema = system_prompt("minuta", area, texto_caso)
     problema = ""
     for tentativa in range(MAX_ATTEMPTS):
         prompt = user_prompt

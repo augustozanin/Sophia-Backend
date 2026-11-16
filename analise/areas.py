@@ -13,8 +13,10 @@ minuto do Groq gratuito é apertado):
 - minuta: competência, prazos, orientação de minuta e cautelas.
 
 As normas citadas aqui são pontos de partida para a IA conferir, nunca fontes já verificadas do
-caso. De propósito, não há número de tema, súmula ou processo: a regra 2 do prompt proíbe número
-sem fonte verificada, e um número escrito aqui seria repetido como se fosse.
+caso. De propósito, não há número de tema, súmula ou processo nestes blocos: a regra 2 do prompt
+proíbe número sem fonte verificada, e um número escrito aqui seria repetido como se fosse. Os
+números ficam só no catálogo curado de `precedentes.py`, em que cada item foi conferido e leva
+status, data de verificação e URL oficial.
 
 Área ausente ou desconhecida (casos antigos) devolve orientação vazia: o prompt fica igual ao
 genérico de antes.
@@ -22,6 +24,8 @@ genérico de antes.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+
+from .precedentes import bloco_precedentes
 
 TAREFAS = ("analise", "chat", "minuta")
 
@@ -883,8 +887,13 @@ def obter_area(valor: Any) -> Optional[Dict[str, Any]]:
     return _POR_ID[area_id] if area_id else None
 
 
-def orientacao_da_area(valor: Any, tarefa: str) -> str:
-    """Bloco de texto que vai depois do SYSTEM_PROMPT. Vazio quando a área não é conhecida."""
+def orientacao_da_area(valor: Any, tarefa: str, texto_caso: str = "") -> str:
+    """Bloco de texto que vai depois do SYSTEM_PROMPT. Vazio quando a área não é conhecida.
+
+    Com `texto_caso` (relato, documentos, contexto do chat ou da minuta), acrescenta os precedentes
+    curados das sub-áreas ligadas aos fatos (`precedentes.py`). Esses, e só esses, trazem número de
+    tema ou súmula, porque cada um foi conferido e leva status, data de verificação e URL oficial.
+    """
     if tarefa not in _BLOCOS_POR_TAREFA:
         raise ValueError(f"Tarefa inválida: {tarefa}")
     area = obter_area(valor)
@@ -896,6 +905,9 @@ def orientacao_da_area(valor: Any, tarefa: str) -> str:
         partes.append(f"{_TITULOS[bloco]}:\n{itens}")
     if tarefa == "analise":
         partes.append(_FECHO_ANALISE)
+    precedentes = bloco_precedentes(area["id"], tarefa, texto_caso)
+    if precedentes:
+        partes.append(precedentes)
     return "\n\n".join(partes)
 
 

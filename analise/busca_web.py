@@ -55,10 +55,17 @@ def dominios_da_busca() -> List[str]:
 
 
 INSTRUCAO_LINKS = (
-    "\n\nBUSCA NA WEB: pesquise em fontes oficiais (tribunais, legislação) e, quando confirmar uma "
-    "tese, tema, súmula ou julgado numa página consultada, coloque no campo \"fonte\" a referência "
-    "seguida da URL exata dessa página (https://...). Nunca escreva uma URL que você não abriu na "
-    "busca. Se não encontrar a página, mantenha \"não verificado\" e siga a regra 2.")
+    "\n\nBUSCA NA WEB (obrigatória nesta análise). Os precedentes curados do prompt de sistema, quando "
+    "houver, são ponto de partida, não lista fechada. Faça as duas etapas:\n"
+    "1) CONFIRMAR: para cada precedente curado que usar, pesquise (a \"Busca\" indicada ajuda), "
+    "confira se a situação continua a mesma e ponha no campo \"fonte\" a referência seguida da URL "
+    "exata da página oficial que você abriu. Se a busca não achar a página, pode usar a URL do catálogo.\n"
+    "2) AMPLIAR: pesquise além do catálogo outras teses, temas, súmulas e julgados (STF, STJ e o "
+    "tribunal local do caso) aplicáveis a ESTES fatos: os que favorecem o cliente e os contrários que "
+    "o advogado precisa conhecer. Inclua os que confirmar numa página aberta, com a URL. Prefira "
+    "fontes oficiais; site secundário só para localizar o precedente.\n"
+    "Nunca escreva uma URL que você não abriu na busca ou que não esteja no catálogo. Se não encontrar "
+    "a página, mantenha \"não verificado\" e siga a regra 2.")
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>()\[\]]+")
 _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
