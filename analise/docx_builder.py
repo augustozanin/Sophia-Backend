@@ -229,7 +229,7 @@ def build_docx(rascunho: str, estrutura: Optional[Dict[str, Any]] = None) -> byt
     return doc.salvar()
 
 
-def nome_do_arquivo(titulo: str) -> str:
+def nome_do_arquivo(titulo: str, ext: str = "docx") -> str:
     ascii_ = unicodedata.normalize("NFKD", titulo).encode("ascii", "ignore").decode()
     base = re.sub(r"[^A-Za-z0-9]+", "-", ascii_).strip("-").lower()
-    return f"minuta-{base or 'peca'}.docx"
+    return f"minuta-{base or 'peca'}.{ext}"

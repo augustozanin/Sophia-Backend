@@ -26,6 +26,7 @@ from .analysis import run_case_analysis, run_chat_turn, run_chat_turn_stream, ru
 from .areas import AREAS, area_front, normalizar_area
 from .contexto import bloco_dos_documentos, fontes_para_salvar, material_para_analise, texto_dos_relatos
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
+from .pdf_builder import build_pdf, nome_do_pdf
 from .minuta import texto_da_minuta
 from .llm_providers import LLMError, provider_do_servidor
 from .consumo import resumo_do_consumo
@@ -64,8 +65,42 @@ class PecaIn(BaseModel):
     instrucoes: Optional[str] = None
 
 
+class PecaTextoIn(BaseModel):
+    user_id: str
+    texto: str
+
+
+LIMITE_TEXTO_PECA = 200_000
+
+
 def _erro(msg: str, status: int) -> JSONResponse:
     return JSONResponse({"erro": msg}, status_code=status)
+
+
+def _texto_invalido(texto: str) -> Optional[JSONResponse]:
+    if not texto.strip():
+        return _erro("A minuta não pode ficar vazia.", 400)
+    if len(texto) > LIMITE_TEXTO_PECA:
+        return _erro("A minuta ficou grande demais.", 413)
+    return None
+
+
+def _docx_da_peca(peca: Dict[str, Any], texto: str, estrutura: Optional[Dict[str, Any]] = None) -> Response:
+    try:
+        conteudo = build_docx(texto, estrutura)
+    except DocxIndisponivel as e:
+        return _erro(str(e), 503)
+    return Response(
+        content=conteudo,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{nome_do_arquivo(peca["titulo"])}"'})
+
+
+def _pdf_da_peca(peca: Dict[str, Any], texto: str) -> Response:
+    return Response(
+        content=build_pdf(texto),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{nome_do_pdf(peca["titulo"])}"'})
 
 
 def _evento(dados: Dict[str, Any]) -> str:
@@ -321,6 +356,20 @@ def criar_router(obter_contexto: ObterContexto,
             return _erro("Minuta não encontrada.", 404)
         return {"ok": True}
 
+    @router.patch("/pecas/{caso_id}/{peca_id}")
+    async def atualizar_peca(caso_id: str, peca_id: str, body: PecaTextoIn):
+        user_id = body.user_id.strip()
+        arm, _ctx, erro = await _preparar(user_id, caso_id)
+        if erro:
+            return erro
+        recusa = _texto_invalido(body.texto)
+        if recusa:
+            return recusa
+        peca = await arm.atualizar_texto_peca(user_id, caso_id, peca_id, body.texto)
+        if not peca:
+            return _erro("Minuta não encontrada.", 404)
+        return {"peca": peca_front(peca)}
+
     @router.get("/pecas/{caso_id}/{peca_id}/docx")
     async def baixar_peca(caso_id: str, peca_id: str, user_id: str = ""):
         arm, _ctx, erro = await _preparar(user_id, caso_id)
@@ -329,14 +378,45 @@ def criar_router(obter_contexto: ObterContexto,
         peca = await arm.obter_peca(user_id.strip(), caso_id, peca_id)
         if not peca:
             return _erro("Minuta não encontrada.", 404)
-        try:
-            conteudo = build_docx(peca["texto"], peca.get("estrutura"))
-        except DocxIndisponivel as e:
-            return _erro(str(e), 503)
-        return Response(
-            content=conteudo,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{nome_do_arquivo(peca["titulo"])}"'})
+        return _docx_da_peca(peca, peca["texto"], peca.get("estrutura"))
+
+    @router.post("/pecas/{caso_id}/{peca_id}/docx")
+    async def baixar_peca_editada(caso_id: str, peca_id: str, body: PecaTextoIn):
+        user_id = body.user_id.strip()
+        arm, _ctx, erro = await _preparar(user_id, caso_id)
+        if erro:
+            return erro
+        recusa = _texto_invalido(body.texto)
+        if recusa:
+            return recusa
+        peca = await arm.obter_peca(user_id, caso_id, peca_id)
+        if not peca:
+            return _erro("Minuta não encontrada.", 404)
+        return _docx_da_peca(peca, body.texto)
+
+    @router.get("/pecas/{caso_id}/{peca_id}/pdf")
+    async def baixar_peca_pdf(caso_id: str, peca_id: str, user_id: str = ""):
+        arm, _ctx, erro = await _preparar(user_id, caso_id)
+        if erro:
+            return erro
+        peca = await arm.obter_peca(user_id.strip(), caso_id, peca_id)
+        if not peca:
+            return _erro("Minuta não encontrada.", 404)
+        return _pdf_da_peca(peca, peca["texto"])
+
+    @router.post("/pecas/{caso_id}/{peca_id}/pdf")
+    async def baixar_peca_pdf_editada(caso_id: str, peca_id: str, body: PecaTextoIn):
+        user_id = body.user_id.strip()
+        arm, _ctx, erro = await _preparar(user_id, caso_id)
+        if erro:
+            return erro
+        recusa = _texto_invalido(body.texto)
+        if recusa:
+            return recusa
+        peca = await arm.obter_peca(user_id, caso_id, peca_id)
+        if not peca:
+            return _erro("Minuta não encontrada.", 404)
+        return _pdf_da_peca(peca, body.texto)
 
     @router.post("/pecas/{caso_id}")
     async def gerar_peca(caso_id: str, body: PecaIn):

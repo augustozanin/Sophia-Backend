@@ -117,6 +117,15 @@ class _Colecao:
                 return _Obj(deleted_count=1)
         return _Obj(deleted_count=0)
 
+    async def update_one(self, filtro, atualizacao):
+        for d in self.docs:
+            if self._bate(d, filtro):
+                d.update(atualizacao.get("$set") or {})
+                for chave in atualizacao.get("$unset") or {}:
+                    d.pop(chave, None)
+                return _Obj(matched_count=1)
+        return _Obj(matched_count=0)
+
 
 class _Banco(dict):
     def __getitem__(self, nome):
@@ -305,6 +314,11 @@ class Armazenamento_(unittest.TestCase):
         self.assertEqual(rodar(self.arm.obter_peca("A", "c1", peca["id"]))["texto"], "texto")
         self.assertIsNone(rodar(self.arm.obter_peca("B", "c1", peca["id"])))
         self.assertIsNone(rodar(self.arm.obter_peca("A", "c1", "../x")))
+        peca_com_estrutura = rodar(self.arm.salvar_peca("A", "c1", modelo, "texto", None, 1, {"titulo": "X"}))
+        editada = rodar(self.arm.atualizar_texto_peca("A", "c1", peca_com_estrutura["id"], "editado"))
+        self.assertEqual(editada["texto"], "editado")
+        self.assertNotIn("estrutura", editada)
+        self.assertIsNone(rodar(self.arm.atualizar_texto_peca("B", "c1", peca["id"], "x")))
 
 
 class Contexto(unittest.TestCase):
@@ -418,6 +432,14 @@ class Servidor(unittest.TestCase):
         conteudo = docx_builder.build_docx("MINUTA\n# DOS FATOS\ntexto")
         self.assertTrue(conteudo.startswith(b"PK"))
         self.assertEqual(docx_builder.nome_do_arquivo("Contestação trabalhista"), "minuta-contestacao-trabalhista.docx")
+
+    def test_pdf_em_memoria(self):
+        from analise import pdf_builder
+        conteudo = pdf_builder.build_pdf("EXCELENTÍSSIMO\n\nMARINA, [CPF]")
+        self.assertTrue(conteudo.startswith(b"%PDF-1.4"))
+        self.assertIn(b"[CPF]", conteudo)
+        self.assertTrue(conteudo.rstrip().endswith(b"%%EOF"))
+        self.assertEqual(pdf_builder.nome_do_pdf("Reclamação trabalhista"), "minuta-reclamacao-trabalhista.pdf")
 
 
 class Rotas(unittest.TestCase):

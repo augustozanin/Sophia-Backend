@@ -166,6 +166,18 @@ class Armazenamento:
         r = await self.pecas.delete_one({"_id": ObjectId(peca_id), "user_id": user_id, "caso_id": caso_id})
         return r.deleted_count > 0
 
+    async def atualizar_texto_peca(self, user_id: str, caso_id: str, peca_id: str,
+                                   texto: str) -> Optional[Dict[str, Any]]:
+        """Grava o rascunho editado. A estrutura formatada sai, porque o texto passou a ser a fonte."""
+        if not ObjectId.is_valid(peca_id):
+            return None
+        filtro = {"_id": ObjectId(peca_id), "user_id": user_id, "caso_id": caso_id}
+        resultado = await self.pecas.update_one(
+            filtro, {"$set": {"texto": texto}, "$unset": {"estrutura": ""}})
+        if resultado.matched_count == 0:
+            return None
+        return await self.obter_peca(user_id, caso_id, peca_id)
+
     # ------------------------------------------------------------ consumo de IA
     async def registrar_consumo(self, user_id: str, caso_id: str, tarefa: str, provedor: str,
                                 modelo: str, uso: Dict[str, Any]) -> None:

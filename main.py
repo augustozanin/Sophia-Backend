@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import bcrypt
+import certifi
 import httpx
 from bson import ObjectId
 from dotenv import load_dotenv
@@ -23,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
+from pymongo.errors import ServerSelectionTimeoutError
 
 from analise.areas import AREAS_JURIDICAS
 from analise.document_utils import extract_text
@@ -48,8 +50,20 @@ app.add_middleware(
 )
 
 MONGODB_URI = os.getenv("MONGODB_URI")
-mongo_client = AsyncIOMotorClient(MONGODB_URI) if MONGODB_URI else None
+mongo_client = (
+    AsyncIOMotorClient(
+        MONGODB_URI,
+        tlsCAFile=certifi.where(),
+        serverSelectionTimeoutMS=8000,
+    )
+    if MONGODB_URI
+    else None
+)
 mongo_db = mongo_client["sophia-data"] if mongo_client else None
+MENSAGEM_BANCO_INDISPONIVEL = (
+    "Não foi possível conectar ao banco de dados. "
+    "No MongoDB Atlas, em Network Access, libere o IP desta máquina e tente de novo."
+)
 users_collection = mongo_db["users"] if mongo_db is not None else None
 case_collection = mongo_db["case"] if mongo_db is not None else None
 # Análises, chat e minutas (módulo `analise`), cada um na sua coleção. Relatos e documentos ficam só em `case`.
@@ -67,6 +81,15 @@ FUSO = timezone(timedelta(hours=-3))
 def agora_iso() -> str:
     # Horário de Brasília em formato limpo (ex.: 2026-10-20T17:25:00).
     return datetime.now(FUSO).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _banco_indisponivel(exc: BaseException) -> bool:
+    if isinstance(exc, ServerSelectionTimeoutError):
+        return True
+    texto = str(exc).lower()
+    return "serverselectiontimeout" in texto or (
+        "timed out" in texto and "replica" in texto
+    )
 
 MODEL_SIZE = "small"
 _whisper = None
@@ -537,10 +560,15 @@ async def cadastro(payload: CadastroRequest):
             status_code=400,
         )
 
-    if users_collection is not None:
-        existente = await users_collection.find_one({"email": email})
-    else:
-        existente = next((u for u in _ler_users_arquivo() if u.get("email") == email), None)
+    try:
+        if users_collection is not None:
+            existente = await users_collection.find_one({"email": email})
+        else:
+            existente = next((u for u in _ler_users_arquivo() if u.get("email") == email), None)
+    except Exception as exc:  # noqa: BLE001
+        if _banco_indisponivel(exc):
+            return JSONResponse({"erro": MENSAGEM_BANCO_INDISPONIVEL}, status_code=503)
+        raise
     if existente:
         return JSONResponse({"erro": "Já existe uma conta com este email."}, status_code=400)
 
@@ -577,10 +605,15 @@ async def entrar(payload: EntrarRequest):
     if not email or not senha:
         return JSONResponse({"erro": "Informe email e senha."}, status_code=400)
 
-    if users_collection is not None:
-        documento = await users_collection.find_one({"email": email})
-    else:
-        documento = next((u for u in _ler_users_arquivo() if u.get("email") == email), None)
+    try:
+        if users_collection is not None:
+            documento = await users_collection.find_one({"email": email})
+        else:
+            documento = next((u for u in _ler_users_arquivo() if u.get("email") == email), None)
+    except Exception as exc:  # noqa: BLE001
+        if _banco_indisponivel(exc):
+            return JSONResponse({"erro": MENSAGEM_BANCO_INDISPONIVEL}, status_code=503)
+        raise
 
     if not documento:
         return JSONResponse({"erro": "Email ou senha inválidos."}, status_code=401)
