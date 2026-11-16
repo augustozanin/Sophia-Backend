@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 _TRIBUNAL_RE = re.compile(
-    r"\b(STF|STJ|TST|TSE|STM|TNU|CARF|TCU|TRF\s?\d|TRT\s?\d+|TJ[A-Z]{2}|TRE-?[A-Z]{2})\b")
+    r"\b(STF|STJ|TST|TSE|STM|TNU|CARF|TCU|TRF\s?\d|TRU\s?\d|TRT\s?\d+|TJ[A-Z]{2}|TRE-?[A-Z]{2})\b")
 _URL_RE = re.compile(r"https?://\S+")
 _NIVEIS = {"alta", "media", "baixa"}
 _POSICOES = {"majoritaria", "minoritaria", "em_analise"}
@@ -52,6 +52,74 @@ def _fontes(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [out]
 
 
+# Precedente qualificado (CPC, art. 927): tema, súmula, IRDR, OJ. Julgado isolado não casa.
+_QUALIFICADO_RE = re.compile(r"\b(tema|sumula|irdr|oj)\s*(?:n[o.]?\s*)?(\d+)", re.IGNORECASE)
+_ESPECIES = {"repercussao_geral", "repetitivo", "sumula", "uniformizacao", "irdr", "controle_concentrado", "outro"}
+_SITUACOES = {"vigente", "em_atencao", "alterado", "superado"}
+_REGIONAL_RE = re.compile(r"^(TRF|TRT|TRU|TJ)")
+
+
+def _identificador(item: Dict[str, Any]) -> Optional[str]:
+    """"Tema 1124", "Súmula 47", "IRDR 15"… do campo próprio ou achado no texto do item."""
+    if str(item.get("identificador") or "").strip():
+        return str(item["identificador"]).strip()
+    for campo in ("processo", "titulo", "fonte"):
+        achado = _QUALIFICADO_RE.search(_norm(item.get(campo)))
+        if achado:
+            nome = {"tema": "Tema", "sumula": "Súmula", "irdr": "IRDR", "oj": "OJ"}[achado.group(1).lower()]
+            return f"{nome} {achado.group(2)}"
+    return None
+
+
+def _tribunal(item: Dict[str, Any]) -> Optional[str]:
+    if str(item.get("tribunal") or "").strip():
+        return str(item["tribunal"]).strip().upper().replace(" ", "")
+    for campo in ("fonte", "processo", "titulo"):
+        achado = _TRIBUNAL_RE.search(str(item.get(campo) or ""))
+        if achado:
+            return achado.group(1).replace(" ", "")
+    return None
+
+
+def _dados_do_precedente(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Tribunal, identificador, espécie, nível (N1/N2/N3) e situação, informados pela IA ou deduzidos."""
+    tribunal = _tribunal(item)
+    ident = _identificador(item)
+    especie = _norm(item.get("especie")).replace(" ", "_")
+    if especie not in _ESPECIES:
+        if ident and ident.startswith("Súmula"):
+            especie = "sumula"
+        elif ident and ident.startswith("IRDR"):
+            especie = "irdr"
+        elif tribunal == "STF":
+            especie = "repercussao_geral"
+        elif tribunal in ("STJ", "TST"):
+            especie = "repetitivo"
+        elif tribunal == "TNU":
+            especie = "uniformizacao"
+        else:
+            especie = "outro"
+    nivel = str(item.get("nivel") or "").strip().upper()
+    if nivel not in ("N1", "N2", "N3"):
+        if tribunal and _REGIONAL_RE.match(tribunal):
+            nivel = "N3"
+        elif tribunal == "TNU" or especie == "sumula":
+            nivel = "N2"
+        elif tribunal in ("STF", "STJ", "TST"):
+            nivel = "N1"
+        else:
+            nivel = "N2"
+    situacao = _norm(item.get("situacao") or item.get("status")).replace(" ", "_")
+    situacao = {"em_analise": "em_atencao"}.get(situacao, situacao)
+    return {"nivel": nivel, "tribunal": tribunal, "identificador": ident, "especie": especie,
+            "situacao": situacao if situacao in _SITUACOES else None}
+
+
+def _eh_precedente_qualificado(item: Dict[str, Any]) -> bool:
+    """Julgado que a IA pôs em "jurisprudencia" mas é tema, súmula ou IRDR (análises antigas)."""
+    return any(_QUALIFICADO_RE.search(_norm(item.get(c))) for c in ("processo", "titulo"))
+
+
 def _posicao(valor: Any) -> Optional[str]:
     v = _norm(valor)
     if v == "minoritaria_em_analise":  # valor do schema antigo
@@ -74,9 +142,15 @@ def para_analise_front(registro: Dict[str, Any], caso_id: str) -> Dict[str, Any]
 
     for t in dados.get("teses", []):
         novo("tese", t.get("titulo"), t.get("descricao"), _nivel(t.get("relevancia")), fontes=_fontes(t))
+    # Precedentes qualificados (temas, súmulas, IRDR), com nível N1/N2/N3 para as abas do front.
     for t in dados.get("temas_stf_stj", []):
-        novo("tema_superior", t.get("titulo"), t.get("descricao"), _nivel(t.get("relevancia")), fontes=_fontes(t))
+        novo("tema_superior", t.get("titulo"), t.get("descricao"), _nivel(t.get("relevancia")), fontes=_fontes(t),
+             **_dados_do_precedente(t))
     for j in dados.get("jurisprudencia", []):
+        if _eh_precedente_qualificado(j):
+            novo("tema_superior", j.get("titulo"), j.get("resumo"), "media", fontes=_fontes(j),
+                 **_dados_do_precedente(j))
+            continue
         meta = None
         if j.get("processo") or j.get("tribunal"):
             meta = [str(j.get("tribunal") or "Processo"), str(j.get("processo") or j.get("data") or "")]
