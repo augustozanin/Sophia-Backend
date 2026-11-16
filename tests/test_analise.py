@@ -378,12 +378,12 @@ class Contexto(unittest.TestCase):
 
 class Servidor(unittest.TestCase):
     def test_chave_so_no_servidor(self):
-        guardado = {k: os.environ.pop(k, None) for k in ("GROQ_API_KEY", "SOPHIA_LLM_PROVIDER")}
+        guardado = {k: os.environ.pop(k, None) for k in ("OPENAI_API_KEY", "GROQ_API_KEY", "SOPHIA_LLM_PROVIDER")}
         try:
             with self.assertRaises(LLMError):
                 provider_do_servidor()
-            os.environ["GROQ_API_KEY"] = "gsk_x"
-            self.assertEqual(provider_do_servidor().name, "groq")
+            os.environ["OPENAI_API_KEY"] = "sk_x"
+            self.assertEqual(provider_do_servidor().name, "openai")
             os.environ["SOPHIA_LLM_PROVIDER"] = "nada"
             with self.assertRaises(LLMError):
                 provider_do_servidor()

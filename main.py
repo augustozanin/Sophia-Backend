@@ -139,8 +139,14 @@ def obter_whisper():
     """Carrega o modelo só quando alguém transcreve — o cadastro não depende disso."""
     global _whisper
     if _whisper is None:
-        _garantir_compat_av()
-        from faster_whisper import WhisperModel
+        try:
+            _garantir_compat_av()
+            from faster_whisper import WhisperModel
+        except ImportError as e:
+            raise TranscricaoErro(
+                "Transcrição local indisponível. Configure GROQ_API_KEY ou instale faster-whisper.",
+                503,
+            ) from e
 
         _whisper = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
     return _whisper

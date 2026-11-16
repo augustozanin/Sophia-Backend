@@ -1,7 +1,5 @@
 fastapi
 uvicorn[standard]
-faster-whisper
-websockets
 python-multipart
 httpx
 python-dotenv
@@ -11,6 +9,8 @@ python-docx
 pypdf
 fpdf2
 openai
+# Produção (Vercel) transcreve na Groq. faster-whisper puxa torch e estoura o limite de 500 MB:
+# faster-whisper
 # Opcionais, só se SOPHIA_LLM_PROVIDER for anthropic ou google:
 # anthropic
 # google-genai
