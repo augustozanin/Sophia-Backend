@@ -1,6 +1,0 @@
-# Desenvolvimento na máquina: tudo de produção + o Whisper local, usado só quando
-# GROQ_API_KEY não está configurada. Instale com:
-#   pip install -r requirements-local.txt
-# Fica fora do requirements.txt porque passaria do limite de 500 MB da Vercel.
--r requirements.txt
-faster-whisper

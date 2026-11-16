@@ -378,12 +378,12 @@ class Contexto(unittest.TestCase):
 
 class Servidor(unittest.TestCase):
     def test_chave_so_no_servidor(self):
-        guardado = {k: os.environ.pop(k, None) for k in ("GROQ_API_KEY", "SOPHIA_LLM_PROVIDER")}
+        guardado = {k: os.environ.pop(k, None) for k in ("OPENAI_API_KEY", "GROQ_API_KEY", "SOPHIA_LLM_PROVIDER")}
         try:
             with self.assertRaises(LLMError):
                 provider_do_servidor()
-            os.environ["GROQ_API_KEY"] = "gsk_x"
-            self.assertEqual(provider_do_servidor().name, "groq")
+            os.environ["OPENAI_API_KEY"] = "sk_x"
+            self.assertEqual(provider_do_servidor().name, "openai")
             os.environ["SOPHIA_LLM_PROVIDER"] = "nada"
             with self.assertRaises(LLMError):
                 provider_do_servidor()
@@ -434,11 +434,15 @@ class Servidor(unittest.TestCase):
         self.assertEqual(docx_builder.nome_do_arquivo("Contestação trabalhista"), "minuta-contestacao-trabalhista.docx")
 
     def test_pdf_em_memoria(self):
+        from io import BytesIO
+        from pypdf import PdfReader
         from analise import pdf_builder
-        conteudo = pdf_builder.build_pdf("EXCELENTÍSSIMO\n\nMARINA, [CPF]")
-        self.assertTrue(conteudo.startswith(b"%PDF-1.4"))
-        self.assertIn(b"[CPF]", conteudo)
-        self.assertTrue(conteudo.rstrip().endswith(b"%%EOF"))
+        conteudo = pdf_builder.build_pdf("EXCELENTÍSSIMO\n\nMARINA, [CPF]\nRECLAMAÇÃO TRABALHISTA")
+        self.assertTrue(conteudo.startswith(b"%PDF"))
+        texto = "".join((pagina.extract_text() or "") for pagina in PdfReader(BytesIO(conteudo)).pages)
+        self.assertIn("EXCELENTÍSSIMO", texto)
+        self.assertIn("RECLAMAÇÃO TRABALHISTA", texto)
+        self.assertIn("[CPF]", texto)
         self.assertEqual(pdf_builder.nome_do_pdf("Reclamação trabalhista"), "minuta-reclamacao-trabalhista.pdf")
 
 

@@ -356,7 +356,7 @@ _ENV_CHAVE = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
 
 
 def nome_do_provedor() -> str:
-    return (os.environ.get("SOPHIA_LLM_PROVIDER") or "groq").strip().lower()
+    return (os.environ.get("SOPHIA_LLM_PROVIDER") or "openai").strip().lower()
 
 
 def descricao_da_ia() -> dict:
@@ -379,7 +379,7 @@ def descricao_da_ia() -> dict:
 def provider_do_servidor() -> BaseLLMProvider:
     """
     Provedor configurado no servidor (créditos de IA vêm da assinatura, não do usuário).
-    SOPHIA_LLM_PROVIDER escolhe o provedor (padrão: groq) e a chave vem de <PROVEDOR>_API_KEY
+    SOPHIA_LLM_PROVIDER escolhe o provedor (padrão: openai) e a chave vem de <PROVEDOR>_API_KEY
     no .env do backend. A chave nunca passa pelo navegador.
     """
     nome = nome_do_provedor()
