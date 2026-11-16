@@ -1,115 +1,126 @@
-"""PDF da minuta em UTF-8, Times New Roman, margens da petição (A4)."""
+"""PDF da minuta revisada, montado em memória (A4, Times-Roman, acentos em Windows-1252)."""
 from __future__ import annotations
 
-import re
-from pathlib import Path
+from typing import List
 
 from .docx_builder import nome_do_arquivo
 
-MARGEM_ESQ = 30.0
-MARGEM_DIR = 20.0
-MARGEM_SUP = 30.0
-MARGEM_INF = 20.0
-TAMANHO = 12
-# 12 pt × 1,5, em milímetros.
-ALTURA = 6.35
+COLUNAS = 90
+LINHAS_POR_PAGINA = 48
+ENTRELINHA = 15
 
-_PASTA = Path(__file__).resolve().parent / "fontes"
-_FALLBACKS = (
-    Path(r"C:\Windows\Fonts"),
-    Path("/usr/share/fonts/truetype/liberation"),
-)
-
-
-def _arquivo_fonte(*nomes: str) -> str:
-    for nome in nomes:
-        for pasta in (_PASTA, *_FALLBACKS):
-            caminho = pasta / nome
-            if caminho.is_file():
-                return str(caminho)
-    raise RuntimeError("Fonte Times da minuta não encontrada.")
+_EXTRAS = {
+    "\u2014": "-",
+    "\u2013": "-",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2026": "...",
+    "\u00a0": " ",
+}
 
 
-def _eh_maiusculas(texto: str) -> bool:
-    letras = [ch for ch in texto if ch.isalpha()]
-    return bool(letras) and all(ch.upper() == ch for ch in letras)
+def _win1252(texto: str) -> str:
+    saida = []
+    for ch in texto:
+        if ch in _EXTRAS:
+            saida.append(_EXTRAS[ch])
+            continue
+        c = ord(ch)
+        if c == 9:
+            saida.append("  ")
+            continue
+        if c in (10, 13):
+            saida.append(ch)
+            continue
+        if c < 32:
+            continue
+        saida.append(ch if c <= 255 else "?")
+    return "".join(saida)
 
 
-def _eh_enderecamento(texto: str) -> bool:
-    t = texto.upper()
-    return t.startswith(("EXCELENT", "EXMO", "ILUSTR", "AO ", "À "))
+def _escapar(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _eh_secao(texto: str) -> bool:
-    return bool(re.match(r"^[IVXLCDM]+\s*[-–—]\s+", texto))
-
-
-def _eh_item(texto: str) -> bool:
-    return bool(re.match(r"^[a-z]\)\s", texto))
-
-
-def _eh_titulo_peca(texto: str) -> bool:
-    return (
-        _eh_maiusculas(texto)
-        and 3 < len(texto) < 90
-        and not _eh_enderecamento(texto)
-        and not _eh_secao(texto)
-    )
-
-
-def _eh_fecho_central(texto: str, depois_do_pedido: bool) -> bool:
-    baixo = texto.lower()
-    if baixo.startswith("nestes termos") or "pede deferimento" in baixo:
-        return True
-    return depois_do_pedido and len(texto) < 80
+def _linhas(texto: str) -> List[str]:
+    linhas: List[str] = []
+    for bruta in _win1252(texto).replace("\r\n", "\n").split("\n"):
+        if not bruta:
+            linhas.append("")
+            continue
+        resto = bruta
+        while len(resto) > COLUNAS:
+            corte = resto.rfind(" ", 0, COLUNAS)
+            if corte < COLUNAS // 2:
+                corte = COLUNAS
+            linhas.append(resto[:corte])
+            resto = resto[corte:].lstrip()
+        linhas.append(resto)
+    return linhas
 
 
 def build_pdf(rascunho: str) -> bytes:
-    from fpdf import FPDF
+    linhas = _linhas((rascunho or "").strip() or " ")
+    paginas = [linhas[i:i + LINHAS_POR_PAGINA] for i in range(0, len(linhas), LINHAS_POR_PAGINA)] or [[""]]
 
-    pdf = FPDF(format="A4", unit="mm")
-    pdf.set_lang("pt-BR")
-    pdf.set_title("Minuta")
-    pdf.set_margins(MARGEM_ESQ, MARGEM_SUP, MARGEM_DIR)
-    pdf.set_auto_page_break(auto=True, margin=MARGEM_INF)
-    pdf.add_font("TimesBR", fname=_arquivo_fonte("times.ttf", "LiberationSerif-Regular.ttf"))
-    pdf.add_font("TimesBR", style="B", fname=_arquivo_fonte("timesbd.ttf", "LiberationSerif-Bold.ttf"))
-    pdf.add_page()
+    partes: List[bytes] = []
+    tamanho = 0
+    offsets = [0]
 
-    viu_secao = False
-    depois_do_pedido = False
+    def escrever(s: str | bytes) -> None:
+        nonlocal tamanho
+        buf = s if isinstance(s, bytes) else s.encode("latin-1")
+        partes.append(buf)
+        tamanho += len(buf)
 
-    def escrever(texto: str, alinhamento: str, negrito: bool) -> None:
-        pdf.set_x(pdf.l_margin)
-        pdf.set_font("TimesBR", style="B" if negrito else "", size=TAMANHO)
-        pdf.multi_cell(w=pdf.epw, h=ALTURA, text=texto, align=alinhamento)
+    def obj(n: int, corpo: str) -> None:
+        while len(offsets) <= n:
+            offsets.append(0)
+        offsets[n] = tamanho
+        escrever(f"{n} 0 obj\n{corpo}\nendobj\n")
 
-    for bruta in (rascunho or "").replace("\r\n", "\n").split("\n"):
-        texto = re.sub(r"^#+\s*", "", bruta.strip()).replace("**", "").strip()
-        if not texto:
-            pdf.ln(ALTURA / 2)
-            continue
-        if _eh_fecho_central(texto, depois_do_pedido):
-            depois_do_pedido = True
-            escrever(texto, "C", False)
-            continue
-        if not viu_secao and _eh_enderecamento(texto):
-            escrever(texto, "L", True)
-            continue
-        if _eh_titulo_peca(texto) and not viu_secao:
-            escrever(texto, "C", True)
-            continue
-        if _eh_secao(texto) or (_eh_maiusculas(texto) and len(texto) < 90):
-            viu_secao = True
-            escrever(texto, "L", True)
-            continue
-        if _eh_item(texto):
-            escrever(texto, "J", False)
-            continue
-        escrever(texto, "J", False)
+    escrever("%PDF-1.4\n")
+    obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+    ids = [4 + i * 2 for i in range(len(paginas))]
+    obj(2, f"<< /Type /Pages /Count {len(paginas)} /Kids [{' '.join(f'{i} 0 R' for i in ids)}] >>")
+    obj(3, "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>")
 
-    saida = pdf.output()
-    return bytes(saida)
+    for i, pagina in enumerate(paginas):
+        id_pagina = 4 + i * 2
+        id_fluxo = id_pagina + 1
+        desenho = "\n".join([
+            "BT",
+            "/F1 12 Tf",
+            f"{ENTRELINHA} TL",
+            "72 770 Td",
+            *[
+                f"({_escapar(linha)}) Tj" if j == 0 else f"T* ({_escapar(linha)}) Tj"
+                for j, linha in enumerate(pagina)
+            ],
+            "ET",
+        ]).encode("latin-1")
+        obj(
+            id_pagina,
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {id_fluxo} 0 R >>",
+        )
+        while len(offsets) <= id_fluxo:
+            offsets.append(0)
+        offsets[id_fluxo] = tamanho
+        escrever(f"{id_fluxo} 0 obj\n<< /Length {len(desenho)} >>\nstream\n")
+        escrever(desenho)
+        escrever("\nendstream\nendobj\n")
+
+    inicio = tamanho
+    total = len(offsets)
+    escrever(f"xref\n0 {total}\n")
+    escrever("0000000000 65535 f \n")
+    for i in range(1, total):
+        escrever(f"{offsets[i]:010d} 00000 n \n")
+    escrever(f"trailer << /Size {total} /Root 1 0 R >>\nstartxref\n{inicio}\n%%EOF\n")
+    return b"".join(partes)
 
 
 def nome_do_pdf(titulo: str) -> str:

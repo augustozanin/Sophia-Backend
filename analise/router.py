@@ -68,7 +68,6 @@ class PecaIn(BaseModel):
 class PecaTextoIn(BaseModel):
     user_id: str
     texto: str
-    titulo: str = ""
 
 
 LIMITE_TEXTO_PECA = 200_000
@@ -407,11 +406,17 @@ def criar_router(obter_contexto: ObterContexto,
 
     @router.post("/pecas/{caso_id}/{peca_id}/pdf")
     async def baixar_peca_pdf_editada(caso_id: str, peca_id: str, body: PecaTextoIn):
+        user_id = body.user_id.strip()
+        arm, _ctx, erro = await _preparar(user_id, caso_id)
+        if erro:
+            return erro
         recusa = _texto_invalido(body.texto)
         if recusa:
             return recusa
-        titulo = (body.titulo or "").strip() or "minuta"
-        return _pdf_da_peca({"titulo": titulo}, body.texto)
+        peca = await arm.obter_peca(user_id, caso_id, peca_id)
+        if not peca:
+            return _erro("Minuta não encontrada.", 404)
+        return _pdf_da_peca(peca, body.texto)
 
     @router.post("/pecas/{caso_id}")
     async def gerar_peca(caso_id: str, body: PecaIn):
