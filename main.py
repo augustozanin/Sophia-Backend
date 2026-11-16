@@ -29,6 +29,8 @@ from analise.document_utils import extract_text
 from analise.llm_providers import LLMError, descricao_da_ia, nome_do_provedor, provider_do_servidor
 from analise.router import criar_router as criar_router_analise
 from analise.storage import Armazenamento
+from prazos.router import criar_router as criar_router_prazos
+from prazos.storage import ArmazenamentoPrazos
 
 PASTA_BACK = Path(__file__).resolve().parent
 # override: o .env do backend vale mesmo se a variável já chegou vazia no processo.
@@ -52,6 +54,8 @@ users_collection = mongo_db["users"] if mongo_db is not None else None
 case_collection = mongo_db["case"] if mongo_db is not None else None
 # Análises, chat e minutas (módulo `analise`), cada um na sua coleção. Relatos e documentos ficam só em `case`.
 armazenamento_ia = Armazenamento(mongo_db) if mongo_db is not None else None
+# Acompanhamento de prazos (módulo `prazos`): monitoramentos, intimações do DJEN e prazos.
+armazenamento_prazos = ArmazenamentoPrazos(mongo_db) if mongo_db is not None else None
 USERS_FILE = PASTA_BACK / "data" / "users.json"
 CASES_FILE = PASTA_BACK / "data" / "cases.json"
 STATUS_CASO = {"gravacao_pendente", "em_analise", "concluido"}
@@ -1307,6 +1311,22 @@ async def marcar_caso_analisado(user_id: str, caso_id: str, versao: int) -> None
 
 
 app.include_router(criar_router_analise(contexto_do_caso, lambda: armazenamento_ia, marcar_caso_analisado))
+
+
+# ---------------------------------------------------------------------------
+# Acompanhamento de prazos (módulo `prazos`)
+# ---------------------------------------------------------------------------
+
+
+async def caso_do_usuario(user_id: str, caso_id: str) -> bool:
+    """O caso existe, é do usuário e não foi excluído. Vale para ligar um processo a ele."""
+    if not _caso_id_valido(caso_id):
+        return False
+    documento = await _buscar_caso_do_usuario(user_id, caso_id)
+    return bool(documento) and documento.get("in_system") is not False
+
+
+app.include_router(criar_router_prazos(lambda: armazenamento_prazos, caso_do_usuario))
 
 
 @app.websocket("/ws/transcribe")
