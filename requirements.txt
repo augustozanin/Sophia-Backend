@@ -1,6 +1,8 @@
+# Pacote de produção (Vercel). O limite da Vercel para funções Python é 500 MB descompactado.
+# O Whisper local (faster-whisper, ~370 MB) fica em requirements-local.txt: em produção a
+# transcrição é sempre pela Groq, e o Whisper local nunca roda na Vercel.
 fastapi
 uvicorn[standard]
-faster-whisper
 websockets
 python-multipart
 httpx

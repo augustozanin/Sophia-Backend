@@ -2,7 +2,7 @@
 Sophia — API (cadastro + transcrição).
 Em produção a transcrição vai para o Whisper da Groq (GROQ_API_KEY).
 O faster-whisper local só entra se a chave não estiver configurada
-(desenvolvimento na máquina).
+(desenvolvimento na máquina; instale com requirements-local.txt).
 """
 
 import asyncio
@@ -140,8 +140,16 @@ def obter_whisper():
     """Carrega o modelo só quando alguém transcreve — o cadastro não depende disso."""
     global _whisper
     if _whisper is None:
-        _garantir_compat_av()
-        from faster_whisper import WhisperModel
+        try:
+            _garantir_compat_av()
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            # O Whisper local está em requirements-local.txt (fora do pacote da Vercel).
+            raise TranscricaoErro(
+                "Whisper local não instalado. Configure GROQ_API_KEY no .env do backend "
+                "ou rode: pip install -r requirements-local.txt",
+                503,
+            ) from exc
 
         _whisper = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
     return _whisper
