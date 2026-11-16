@@ -41,10 +41,16 @@ jurisprudência ou tema que apresentar. Se não tiver certeza, indique "não ver
 2. PROIBIDO combinar "fonte: não verificado" com número específico de processo, súmula, tema ou \
 data na mesma entrada. Se a fonte não está verificada, descreva a tese sem número (processo = null).
 
-3. Regra de jurisdição: disputas contratuais/cíveis comuns entre particulares são competência do \
-STJ, nunca do STF (que só julga matéria constitucional). Deixe "temas_stf_stj" como lista vazia \
-sempre que não houver questão constitucional genuína ou tema real conhecido; nunca preencha só \
-para não ficar vazio.
+3. Regra de jurisdição e de colunas: disputas contratuais/cíveis comuns entre particulares são \
+competência do STJ, nunca do STF (que só julga matéria constitucional); não atribua tema ao STF sem \
+questão constitucional genuína. "temas_stf_stj" reúne os PRECEDENTES QUALIFICADOS aplicáveis aos \
+fatos: teses de repercussão geral e de controle concentrado do STF, recursos repetitivos do STJ e do \
+TST, súmulas, temas e súmulas da TNU, IRDR e súmulas de tribunais regionais. Classifique cada um em \
+"nivel": N1 (vinculante nacional: STF; STJ e TST em repetitivos), N2 (uniformização: súmulas dos \
+tribunais superiores, TNU) ou N3 (regional: TRF, TRT, TJ, turma regional). "jurisprudencia" fica \
+para julgados isolados (acórdãos de turma, AgInt, REsp ou apelação comuns). Preencha \
+"temas_stf_stj" sempre que houver precedente qualificado aplicável; deixe vazio só se não houver \
+nenhum, nunca para fugir da regra 1, e nunca preencha só para não ficar vazio.
 
 4. Não invente dados factuais/técnicos (valores em R$, percentuais, datas exatas, medições, \
 artigos de lei) que não constem literalmente na transcrição ou nos documentos.
@@ -62,7 +68,11 @@ antes ou depois, neste schema:
 {
   "resumo_caso": "string curta (3-5 frases)",
   "teses": [{"titulo": "", "descricao": "", "relevancia": "alta|media|baixa", "fonte": "string ou 'não verificado'"}],
-  "temas_stf_stj": [{"titulo": "", "descricao": "", "relevancia": "alta|media|baixa", "fonte": "string ou 'não verificado'"}],
+  "temas_stf_stj": [{"titulo": "", "descricao": "", "relevancia": "alta|media|baixa",
+                     "tribunal": "STF|STJ|TST|TNU|TRF4|TRT4|TJRS|...", "identificador": "Tema 1124 | Súmula 47 | IRDR 15",
+                     "especie": "repercussao_geral|repetitivo|sumula|uniformizacao|irdr|controle_concentrado|outro",
+                     "nivel": "N1|N2|N3", "situacao": "vigente|em_atencao|alterado|superado",
+                     "fonte": "string ou 'não verificado'"}],
   "jurisprudencia": [{"titulo": "", "tribunal": "", "processo": "string ou null", "data": "string ou null",
                       "resumo": "", "status": "majoritaria|minoritaria|em_analise", "fonte": "string ou 'não verificado'"}],
   "perguntas_sugeridas": [{"pergunta": "", "objetivo": ""}],
@@ -142,7 +152,7 @@ def _unverified_with_number(item: Dict[str, Any]) -> bool:
         return False
     if item.get("processo"):
         return True
-    blob = " ".join(str(item.get(k, "")) for k in ("titulo", "descricao", "resumo"))
+    blob = " ".join(str(item.get(k, "")) for k in ("titulo", "descricao", "resumo", "identificador"))
     return bool(_SPECIFIC_NUMBER_RE.search(blob))
 
 

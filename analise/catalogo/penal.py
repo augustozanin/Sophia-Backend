@@ -1,0 +1,190 @@
+"""Direito Penal e Processo Penal: precedentes curados (conferidos em 16/11/2026: STF — página do tema e tese
+oficial —, STJ — temas e PDF oficial de súmulas —, lista oficial de IRDRs do TJPR)."""
+from .base import p, stf, stj, stj_sumula, sub
+
+TJPR_IRDR = "https://ejud.tjpr.jus.br/web/guest/nugep-irdr-admitidos"
+
+ALCANCE = "regional do TJ indicado (RS, SC ou PR) ou do TRF4, só para casos que tramitam lá"
+
+SUBAREAS = [
+    sub("drogas", "Drogas: uso pessoal, tráfico e tráfico privilegiado",
+        [r"droga", r"maconha", r"cocaina", r"\bcrack\b", r"trafico", r"entorpecente", r"\b33\b", r"usuario",
+         r"flagrante com", r"11\.343"],
+        [
+            p("STF, Tema 506 (RE 635.659)", "N1", "tese de repercussão geral, nacional", "VIGENTE",
+              "trânsito em julgado em 18/03/2025; redação integral da tese conferida só em fontes secundárias",
+              "Maconha para uso pessoal não é infração penal",
+              "O cliente foi pego com uma pequena quantidade de maconha para consumo próprio.",
+              "Adquirir, guardar, transportar ou trazer consigo maconha para consumo pessoal não é infração penal "
+              "(vira ilícito administrativo). Presume-se usuário quem porta até 40 gramas, critério que admite "
+              "prova em contrário nos dois sentidos.",
+              '"Tema 506" STF maconha "consumo pessoal" 40 gramas', stf(506),
+              "Vale só para cannabis. Acima de 40 gramas, ainda dá para provar a condição de usuário."),
+            p("STJ, Tema 1262", "N1", "tese repetitiva, nacional", "EM ATENÇÃO",
+              "acórdão publicado; recurso extraordinário pendente",
+              "Droga em quantidade ínfima não aumenta a pena-base",
+              "Apreenderam pouquíssima droga e o juiz aumentou a pena pela natureza dela.",
+              "É desproporcional majorar a pena-base pela natureza e quantidade (Lei 11.343/2006, art. 42) quando a "
+              "droga apreendida é de quantidade ínfima, qualquer que seja a natureza.",
+              '"Tema 1262" STJ "ínfima quantidade" pena-base', stj(1262)),
+            p("STJ, Tema 1154", "N1", "tema repetitivo julgado, tese ainda não publicada", "EM ATENÇÃO",
+              "mérito julgado; aguardando publicação do acórdão",
+              "Natureza e quantidade, sozinhas, afastam o tráfico privilegiado?",
+              "O cliente é primário, mas o juiz negou o redutor por causa da quantidade de droga.",
+              "Sem tese publicada. O STJ julgou se a natureza e a quantidade da droga, isoladamente, bastam para "
+              "afastar a minorante do tráfico privilegiado (Lei 11.343/2006, art. 33, § 4º).",
+              '"Tema 1154" STJ tráfico privilegiado quantidade natureza', stj(1154),
+              "Confira a tese publicada antes de usar. A fração do redutor pela quantidade é o Tema 1241/STJ, "
+              "também julgado e sem acórdão publicado."),
+            p("STJ, Súmula 630", "N2", "súmula do STJ, nacional", "VIGENTE", "enunciado em vigor (PDF oficial)",
+              "Confissão no tráfico exige admitir a traficância",
+              "O cliente admite que a droga era dele, mas diz que era para uso.",
+              "A atenuante da confissão no tráfico exige que o acusado reconheça a traficância; não basta admitir a "
+              "posse para uso próprio.",
+              '"Súmula 630" STJ confissão tráfico', stj_sumula(630)),
+        ], lacunas="N3: sem precedente verificado."),
+    sub("dosimetria", "Dosimetria: antecedentes, reincidência e confissão",
+        [r"\bpena\b", r"dosimetria", r"reincid", r"antecedent", r"primari", r"confess", r"confissao",
+         r"atenuante", r"agravante", r"pena-base", r"regime inicial"],
+        [
+            p("STJ, Tema 1194", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "Confissão atenua mesmo sem ser usada na sentença",
+              "O cliente confessou, mas o juiz não usou a confissão para condenar.",
+              "A confissão espontânea atenua a pena ainda que não usada no convencimento do julgador e mesmo havendo "
+              "outras provas, desde que não retratada (salvo se a confissão retratada serviu à apuração).",
+              '"Tema 1194" STJ confissão espontânea atenuante', stj(1194),
+              "Amplia a Súmula 545/STJ, que exigia o uso da confissão no convencimento."),
+            p("STJ, Tema 585", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado (tese revisada)",
+              "Confissão compensa a reincidência",
+              "O cliente é reincidente e confessou.",
+              "Na segunda fase, a confissão compensa integralmente a reincidência, específica ou não; na "
+              "multirreincidência, a agravante prepondera, admitida compensação proporcional.",
+              '"Tema 585" STJ compensação confissão reincidência', stj(585)),
+            p("STJ, Tema 1077", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "Condenação antiga não piora personalidade ou conduta social",
+              "O juiz usou condenações antigas do cliente para dizer que tem personalidade voltada ao crime.",
+              "Condenações transitadas não usadas para reincidência só podem pesar como antecedentes na primeira "
+              "fase, nunca para desabonar a personalidade ou a conduta social.",
+              '"Tema 1077" STJ antecedentes personalidade conduta social', stj(1077)),
+            p("STJ, Súmula 444", "N2", "súmula do STJ, nacional", "VIGENTE", "enunciado em vigor (PDF oficial)",
+              "Inquéritos e processos em curso não aumentam a pena",
+              "O cliente responde a outros processos ainda sem condenação definitiva.",
+              "É vedado usar inquéritos e ações penais em curso para agravar a pena-base.",
+              '"Súmula 444" STJ inquéritos ações em curso pena-base', stj_sumula(444)),
+            p("STJ, Súmula 231", "N2", "súmula do STJ, nacional", "VIGENTE", "enunciado em vigor (PDF oficial)",
+              "Atenuante não leva a pena abaixo do mínimo",
+              "A pena-base ficou no mínimo e há atenuantes.",
+              "A incidência de atenuante não pode reduzir a pena abaixo do mínimo legal.",
+              '"Súmula 231" STJ atenuante mínimo legal', stj_sumula(231),
+              "Desfavorável à defesa: há debate doutrinário, mas a súmula segue em vigor."),
+        ], lacunas="N3: sem precedente verificado."),
+    sub("prova-processo-penal", "Prova, prisão, júri e acordo de não persecução",
+        [r"busca", r"invadi", r"entraram na casa", r"sem mandado", r"mandado", r"flagrante", r"prisao",
+         r"preso", r"\bjuri\b", r"homicidio", r"\banpp\b", r"nao persecucao", r"acordo com o mp", r"denuncia"],
+        [
+            p("STF, Tema 280 (RE 603.616)", "N1", "tese de repercussão geral, nacional", "VIGENTE",
+              "trânsito em julgado em 21/06/2016",
+              "Entrada em casa sem mandado só com fundadas razões",
+              "A polícia entrou na casa do cliente sem mandado e achou algo.",
+              "A entrada forçada em domicílio sem mandado só é lícita, mesmo à noite, com fundadas razões, "
+              "justificadas depois, de que há flagrante dentro da casa; do contrário, os atos são nulos e o agente "
+              "responde.",
+              '"Tema 280" STF domicílio "fundadas razões" flagrante', stf(280),
+              "Explore a ausência de fundadas razões concretas antes da entrada (denúncia anônima, fuga, cheiro)."),
+            p("STF, Tema 1068 (RE 1.235.340)", "N1", "tese de repercussão geral, nacional", "VIGENTE",
+              "trânsito em julgado em 26/09/2025",
+              "Condenação do júri executa na hora",
+              "O cliente foi condenado pelo júri e quer recorrer em liberdade.",
+              "A soberania dos veredictos autoriza a execução imediata da condenação do júri, qualquer que seja a pena.",
+              '"Tema 1068" STF júri execução imediata', stf(1068),
+              "Desfavorável à defesa: concentre-se em nulidades e em cautelares alternativas."),
+            p("STJ, Tema 1098", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "ANPP retroage a processos em andamento",
+              "O processo começou antes do pacote anticrime e ninguém ofereceu acordo de não persecução.",
+              "O ANPP tem natureza híbrida e retroage: cabe em processos em andamento na vigência da Lei 13.964/2019, "
+              "mesmo sem confissão até então, se pedido antes do trânsito em julgado.",
+              '"Tema 1098" STJ ANPP retroatividade', stj(1098)),
+        ], lacunas="N2 e N3: sem precedente verificado."),
+    sub("violencia-domestica", "Violência doméstica e familiar (Lei Maria da Penha)",
+        [r"maria da penha", r"violencia domestica", r"medida protetiva", r"agress", r"ex-marido|ex marido",
+         r"companheiro bateu", r"ameac", r"11\.340"],
+        [
+            p("STJ, Tema 983", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "Dano moral mínimo na sentença criminal",
+              "A vítima de violência doméstica quer reparação já no processo criminal.",
+              "Na violência doméstica, pode-se fixar indenização mínima por dano moral na sentença, com pedido "
+              "expresso da acusação ou da ofendida, ainda que sem valor, e sem instrução específica.",
+              '"Tema 983" STJ violência doméstica dano moral mínimo', stj(983),
+              "Peça na denúncia ou na habilitação como assistente."),
+            p("STJ, Tema 1186", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "Maria da Penha vale para meninas e adolescentes",
+              "A vítima é uma menina agredida em casa por familiar.",
+              "O gênero feminino basta para aplicar a Lei Maria da Penha na violência doméstica, prevalecendo sobre "
+              "a idade e sobre estatutos específicos como o ECA.",
+              '"Tema 1186" STJ Maria da Penha criança adolescente', stj(1186)),
+            p("STJ, Súmula 589", "N2", "súmula do STJ, nacional", "VIGENTE", "enunciado em vigor (PDF oficial)",
+              "Sem insignificância na violência doméstica",
+              "A defesa diz que a agressão foi leve demais para ser crime.",
+              "É inaplicável o princípio da insignificância a crimes ou contravenções contra a mulher no âmbito "
+              "doméstico.",
+              '"Súmula 589" STJ insignificância violência doméstica', stj_sumula(589)),
+            p("STJ, Súmula 536", "N2", "súmula do STJ, nacional", "VIGENTE", "enunciado em vigor (PDF oficial)",
+              "Sem transação penal nem suspensão do processo",
+              "O acusado quer transação penal ou suspensão condicional num caso de Maria da Penha.",
+              "A suspensão condicional do processo e a transação penal não se aplicam aos delitos sob o rito da Lei "
+              "Maria da Penha.",
+              '"Súmula 536" STJ Maria da Penha transação suspensão', stj_sumula(536)),
+            p("TJPR, IRDR 55", "N3", "IRDR, só no Paraná", "VIGENTE", "mérito julgado",
+              "Vara competente para crimes leves contra crianças em casa (PR)",
+              "Menor potencial ofensivo contra criança ou adolescente em contexto doméstico, no Paraná.",
+              "Competem às Varas de Crimes contra Crianças e Adolescentes os delitos de menor potencial ofensivo "
+              "contra vítimas crianças ou adolescentes em violência doméstica; onde não houver, aos Juizados ou "
+              "Varas de Violência Doméstica.",
+              '"IRDR 55" TJPR competência violência doméstica criança', TJPR_IRDR),
+        ]),
+    sub("execucao-penal", "Execução penal: progressão, faltas e remição",
+        [r"execucao penal", r"progressao", r"regime fechado", r"semiaberto", r"falta grave", r"remicao",
+         r"livramento", r"indulto", r"\bvep\b", r"preso trabalha", r"hediondo"],
+        [
+            p("STJ, Tema 709", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "Falta grave reinicia a progressão, não o livramento",
+              "O preso cometeu falta grave e a data dos benefícios foi refeita.",
+              "A falta grave interrompe o prazo da progressão, com nova data-base; não interrompe o livramento "
+              "condicional (Súmula 441/STJ) nem, automaticamente, comutação e indulto.",
+              '"Tema 709" STJ falta grave data-base progressão', stj(709)),
+            p("STJ, Tema 1084", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "Hediondo sem morte e não reincidente específico: 40%",
+              "O cliente cumpre pena por crime hediondo, sem morte, e não é reincidente em crime semelhante.",
+              "Retroage o patamar do art. 112, V, da LEP (Lei 13.964/2019) aos condenados por hediondo ou equiparado "
+              "sem resultado morte que não sejam reincidentes em delito de natureza semelhante.",
+              '"Tema 1084" STJ progressão hediondo retroatividade', stj(1084)),
+            p("STJ, Tema 917", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "Trabalho fora do presídio também remite",
+              "O preso trabalha fora da unidade no semiaberto ou fechado.",
+              "É possível a remição pelo trabalho extramuros do condenado em regime fechado ou semiaberto.",
+              '"Tema 917" STJ remição trabalho extramuros', stj(917)),
+        ], lacunas="N2 e N3: sem precedente verificado."),
+    sub("insignificancia", "Insignificância, furto e descaminho",
+        [r"insignific", r"bagatela", r"furto", r"furtou", r"descaminho", r"contrabando", r"cigarro",
+         r"pequeno valor"],
+        [
+            p("STJ, Tema 157", "N1", "tese repetitiva, nacional", "VIGENTE", "tese revisada; vale o texto atual",
+              "Descaminho e crimes tributários federais até R$ 20 mil",
+              "O cliente trouxe mercadoria do exterior sem pagar imposto, em valor baixo.",
+              "Aplica-se a insignificância aos crimes tributários federais e ao descaminho quando o débito não passa "
+              "de R$ 20.000,00 (Lei 10.522/2002, art. 20, com as Portarias MF 75 e 130).",
+              '"Tema 157" STJ insignificância descaminho 20 mil', stj(157),
+              "Reiteração da conduta afasta a insignificância, salvo se socialmente recomendável (Tema 1218/STJ)."),
+            p("STJ, Tema 1205", "N1", "tese repetitiva, nacional", "VIGENTE", "trânsito em julgado",
+              "Devolver o bem furtado não basta para a insignificância",
+              "O cliente furtou algo, foi pego na hora e o bem voltou à vítima.",
+              "A restituição imediata e integral do bem furtado não basta, por si só, para aplicar a insignificância.",
+              '"Tema 1205" STJ restituição furto insignificância', stj(1205),
+              "Desfavorável à defesa: some outros vetores (valor, ausência de violência, primariedade)."),
+            p("STJ, Súmula 599", "N2", "súmula do STJ, nacional", "VIGENTE", "enunciado em vigor (PDF oficial)",
+              "Sem insignificância contra a administração pública",
+              "O caso envolve peculato, corrupção ou outro crime contra a administração.",
+              "O princípio da insignificância é inaplicável aos crimes contra a administração pública.",
+              '"Súmula 599" STJ insignificância administração pública', stj_sumula(599)),
+        ], lacunas="N3: sem precedente verificado."),
+]
