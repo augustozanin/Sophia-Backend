@@ -41,12 +41,25 @@ async def buscar_http(parametros: Dict[str, Any]) -> Tuple[int, Optional[Dict[st
             resposta = await cliente.get(URL_DJEN, params=parametros,
                                          headers={"Accept": "application/json", "User-Agent": "Sophia/1.0"})
     except httpx.HTTPError as exc:
-        raise ErroDjen(f"Não foi possível falar com o DJEN ({exc.__class__.__name__}).") from exc
+        detalhe = f"{exc.__class__.__name__}: {exc}" if str(exc) else exc.__class__.__name__
+        raise ErroDjen(f"Não foi possível falar com o DJEN ({detalhe}).") from exc
     try:
         corpo = resposta.json()
     except ValueError:
-        corpo = None
+        # Guarda o começo do que veio (HTML de bloqueio, por exemplo) para a mensagem de erro.
+        corpo = {"_texto": re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", resposta.text or "")).strip()[:300]}
     return resposta.status_code, corpo
+
+
+def _detalhe_da_resposta(corpo: Optional[Dict[str, Any]]) -> str:
+    """O que a API disse, para entrar na mensagem: `message`, texto cru ou nada."""
+    if not isinstance(corpo, dict):
+        return ""
+    for chave in ("message", "mensagem", "error", "_texto"):
+        valor = corpo.get(chave)
+        if isinstance(valor, str) and valor.strip():
+            return f": {valor.strip()[:300]}"
+    return ""
 
 
 async def buscar_comunicacoes(buscar: Buscar, filtros: Dict[str, str], max_paginas: int) -> List[Dict[str, Any]]:
@@ -54,15 +67,17 @@ async def buscar_comunicacoes(buscar: Buscar, filtros: Dict[str, str], max_pagin
     itens: List[Dict[str, Any]] = []
     for pagina in range(1, max_paginas + 1):
         status, corpo = await buscar({**filtros, "itensPorPagina": ITENS_POR_PAGINA, "pagina": pagina})
+        detalhe = _detalhe_da_resposta(corpo)
         if status == 429:
             raise ErroDjen("O DJEN limitou as consultas por alguns instantes. Tente de novo em 1 minuto.", limite=True)
         if status == 403:
-            raise ErroDjen("O DJEN recusou a consulta deste servidor (403). Ele pode bloquear acessos de fora do Brasil.")
-        if status != 200 or not isinstance(corpo, dict):
-            raise ErroDjen(f"O DJEN respondeu com erro ({status}). Tente de novo mais tarde.")
+            raise ErroDjen("O DJEN recusou a consulta deste servidor (HTTP 403). Ele pode bloquear acessos de "
+                           f"fora do Brasil{detalhe}")
+        if status != 200 or not isinstance(corpo, dict) or "_texto" in corpo:
+            raise ErroDjen(f"O DJEN respondeu com erro (HTTP {status}, página {pagina}){detalhe}")
         lote = corpo.get("items") or []
         if not isinstance(lote, list):
-            raise ErroDjen("O DJEN devolveu uma resposta em formato inesperado.")
+            raise ErroDjen(f"O DJEN devolveu uma resposta em formato inesperado (sem lista de itens){detalhe}")
         itens.extend(item for item in lote if isinstance(item, dict))
         total = corpo.get("count")
         if len(lote) < ITENS_POR_PAGINA or (isinstance(total, int) and len(itens) >= total):

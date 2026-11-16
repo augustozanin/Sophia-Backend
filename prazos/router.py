@@ -13,12 +13,15 @@ a mesma função `sincronizar_usuario` no futuro.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from . import djen
@@ -38,6 +41,30 @@ RESUMO_TEXTO = 1_200            # caracteres do teor que vão no painel
 
 # (user_id, caso_id) -> o caso existe, é do usuário e não foi excluído
 CasoDoUsuario = Callable[[str, str], Awaitable[bool]]
+
+log = logging.getLogger("sophia.prazos")
+
+
+class RotaComErroDetalhado(APIRoute):
+    """Exceção inesperada (Mongo fora do ar, bug) vira `{ "erro": "..." }` com o tipo e a
+    mensagem, em vez do "Internal Server Error" em texto que a tela não consegue mostrar."""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def tratar(request: Request):
+            try:
+                return await original(request)
+            except (HTTPException, RequestValidationError):
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Erro em %s %s", request.method, request.url.path)
+                return JSONResponse(
+                    {"erro": f"Erro interno no acompanhamento de prazos ({exc.__class__.__name__}: {exc})"},
+                    status_code=500,
+                )
+
+        return tratar
 
 
 def agora() -> datetime:
@@ -238,7 +265,7 @@ class AlteraPrazoIn(BaseModel):
 def criar_router(armazenamento: Callable[[], Optional[ArmazenamentoPrazos]],
                  caso_do_usuario: CasoDoUsuario,
                  buscar: djen.Buscar = djen.buscar_http) -> APIRouter:
-    router = APIRouter(prefix="/prazos", tags=["prazos"])
+    router = APIRouter(prefix="/prazos", tags=["prazos"], route_class=RotaComErroDetalhado)
 
     def _preparar(user_id: str):
         if not user_id.strip():

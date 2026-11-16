@@ -405,6 +405,32 @@ class Rotas(unittest.TestCase):
         self.assertEqual(cliente.get(f"/prazos/publicacoes/{resumida['id']}",
                                      params={"user_id": BRUNO}).status_code, 404)
 
+    def test_excecao_inesperada_vira_erro_com_tipo_e_mensagem(self):
+        async def quebrado(*a, **k):
+            raise ConnectionError("Mongo fora do ar")
+
+        router_arm = ArmazenamentoPrazos(_Banco())
+        router_arm.listar_monitoramentos = quebrado
+        app = FastAPI()
+
+        async def caso(u, c):
+            return True
+
+        app.include_router(router.criar_router(lambda: router_arm, caso, DjenFalso()))
+        r = TestClient(app).get("/prazos/painel", params={"user_id": ANA})
+        self.assertEqual(r.status_code, 500)
+        self.assertEqual(r.json()["erro"],
+                         "Erro interno no acompanhamento de prazos (ConnectionError: Mongo fora do ar)")
+
+    def test_erro_do_djen_traz_o_status_e_o_que_a_api_disse(self):
+        async def fonte(parametros):
+            return 500, {"message": "Erro ao consultar o banco do CNJ"}
+
+        with self.assertRaises(djen.ErroDjen) as ctx:
+            asyncio.run(djen.buscar_comunicacoes(fonte, {}, 1))
+        self.assertEqual(str(ctx.exception),
+                         "O DJEN respondeu com erro (HTTP 500, página 1): Erro ao consultar o banco do CNJ")
+
     def test_limite_de_acompanhamentos(self):
         cliente, banco, _fonte = montar()
         for i in range(router.MAX_MONITORAMENTOS):
