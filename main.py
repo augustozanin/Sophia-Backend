@@ -1,8 +1,8 @@
 """
 Sophia — API (cadastro + transcrição).
-Em produção a transcrição vai para o Whisper da Groq (GROQ_API_KEY).
-O faster-whisper local só entra se a chave não estiver configurada
-(desenvolvimento na máquina).
+Em produção tudo usa a OpenAI (OPENAI_API_KEY): transcrição (whisper-1), revisão, análise,
+chat e minutas. A Groq e o faster-whisper local só entram fora da Vercel, para testar na
+máquina sem a chave da OpenAI.
 """
 
 import asyncio
@@ -28,7 +28,7 @@ from pymongo.errors import ServerSelectionTimeoutError
 
 from analise.areas import AREAS_JURIDICAS
 from analise.document_utils import extract_text
-from analise.llm_providers import LLMError, descricao_da_ia, nome_do_provedor, provider_do_servidor
+from analise.llm_providers import LLMError, descricao_da_ia, provider_do_servidor
 from analise.router import criar_router as criar_router_analise
 from analise.storage import Armazenamento
 from login_google import LoginGoogleIndisponivel, TokenGoogleInvalido, verificar_credencial
@@ -97,14 +97,38 @@ _whisper = None
 OVERLAP_SECONDS = 1.0
 SALVAR_AUDIO_DEBUG = False
 PASTA_DEBUG = str(PASTA_BACK / "debug_audio")
+# Transcrição do áudio pela OpenAI (a mesma conta da análise, do chat e das minutas).
+# whisper-1 transcreve o áudio inteiro. Os gpt-4o-transcribe e gpt-4o-mini-transcribe cortam a
+# saída (~2 mil tokens): num teste de 16 min pararam em 80% do áudio, sem avisar. Por isso o
+# padrão é o whisper-1; SOPHIA_MODELO_TRANSCRICAO troca o modelo.
+OPENAI_TRANSCRICAO_URL = "https://api.openai.com/v1/audio/transcriptions"
+MODELO_TRANSCRICAO_OPENAI = os.getenv("SOPHIA_MODELO_TRANSCRICAO", "whisper-1")
+# Groq: só fora da Vercel, para testar na máquina sem a chave da OpenAI. Em produção, nunca.
 GROQ_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
-# turbo cabe no tempo da função no Vercel; SOPHIA_WHISPER_MODEL=whisper-large-v3 se quiser mais acurácia.
 GROQ_WHISPER_MODELO = os.getenv("SOPHIA_WHISPER_MODEL", "whisper-large-v3-turbo")
-GROQ_WHISPER_LIMITE = 25 * 1024 * 1024
+# Limite de arquivo das duas APIs.
+LIMITE_AUDIO = 25 * 1024 * 1024
+
+
+def em_producao() -> bool:
+    return bool(os.getenv("VERCEL"))
+
+
+def chave_openai() -> str:
+    return os.getenv("OPENAI_API_KEY", "").strip()
 
 
 def chave_groq() -> str:
     return os.getenv("GROQ_API_KEY", "").strip()
+
+
+def servico_de_transcricao() -> str:
+    """openai | groq (só fora da Vercel) | local (faster-whisper, só fora da Vercel) | "" (nenhum)."""
+    if chave_openai():
+        return "openai"
+    if em_producao():
+        return ""
+    return "groq" if chave_groq() else "local"
 
 
 class TranscricaoErro(Exception):
@@ -145,7 +169,7 @@ def obter_whisper():
             from faster_whisper import WhisperModel
         except ImportError as e:
             raise TranscricaoErro(
-                "Transcrição local indisponível. Configure GROQ_API_KEY ou instale faster-whisper.",
+                "Transcrição local indisponível. Configure OPENAI_API_KEY ou instale faster-whisper.",
                 503,
             ) from e
 
@@ -220,11 +244,26 @@ def transcrever_audio_completo_sync(audio_bytes: bytes) -> str:
     return texto
 
 
+async def transcrever_via_openai(audio_bytes: bytes, nome_arquivo: str) -> str:
+    return await _transcrever_por_api(
+        OPENAI_TRANSCRICAO_URL, chave_openai(), MODELO_TRANSCRICAO_OPENAI, "a OpenAI",
+        audio_bytes, nome_arquivo,
+    )
+
+
 async def transcrever_via_groq(audio_bytes: bytes, nome_arquivo: str) -> str:
-    chave = chave_groq()
+    return await _transcrever_por_api(
+        GROQ_TRANSCRIBE_URL, chave_groq(), GROQ_WHISPER_MODELO, "a Groq", audio_bytes, nome_arquivo
+    )
+
+
+async def _transcrever_por_api(
+    url: str, chave: str, modelo: str, servico: str, audio_bytes: bytes, nome_arquivo: str
+) -> str:
+    """API de transcrição no formato da OpenAI (a Groq usa o mesmo), com 3 tentativas no 429."""
     if not chave:
-        raise TranscricaoErro("GROQ_API_KEY ausente no servidor.", 503)
-    if len(audio_bytes) > GROQ_WHISPER_LIMITE:
+        raise TranscricaoErro(f"Chave de {servico} ausente no servidor.", 503)
+    if len(audio_bytes) > LIMITE_AUDIO:
         raise TranscricaoErro(
             "O áudio passou de 25 MB. Finalize a gravação em trechos menores.",
             413,
@@ -232,7 +271,7 @@ async def transcrever_via_groq(audio_bytes: bytes, nome_arquivo: str) -> str:
 
     headers = {"Authorization": f"Bearer {chave}"}
     data = {
-        "model": GROQ_WHISPER_MODELO,
+        "model": modelo,
         "language": "pt",
         "response_format": "json",
     }
@@ -248,15 +287,14 @@ async def transcrever_via_groq(audio_bytes: bytes, nome_arquivo: str) -> str:
         tipo = "audio/ogg"
     elif nome.endswith(".m4a"):
         tipo = "audio/mp4"
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    # Uma reunião de 16 min levou ~40 s no whisper-1; a folga cobre reuniões longas.
+    async with httpx.AsyncClient(timeout=280.0) as client:
         for tentativa in range(3):
             files = {"file": (nome_arquivo, audio_bytes, tipo)}
             try:
-                resposta = await client.post(
-                    GROQ_TRANSCRIBE_URL, headers=headers, files=files, data=data
-                )
+                resposta = await client.post(url, headers=headers, files=files, data=data)
             except httpx.HTTPError as exc:
-                raise TranscricaoErro(f"Falha ao falar com a Groq: {exc}") from exc
+                raise TranscricaoErro(f"Falha ao falar com {servico}: {exc}") from exc
             if resposta.status_code == 429 and tentativa < 2:
                 espera = 1.5
                 try:
@@ -267,21 +305,24 @@ async def transcrever_via_groq(audio_bytes: bytes, nome_arquivo: str) -> str:
                 continue
             if resposta.status_code != 200:
                 raise TranscricaoErro(
-                    f"Groq Whisper retornou status {resposta.status_code}: {resposta.text[:300]}"
+                    f"A transcrição ({servico}) retornou status {resposta.status_code}: {resposta.text[:300]}"
                 )
             return (resposta.json().get("text") or "").strip()
-    raise TranscricaoErro("A Groq atingiu o limite de uso. Tente de novo em instantes.")
+    raise TranscricaoErro(f"{servico[0].upper()}{servico[1:]} atingiu o limite de uso. Tente de novo em instantes.")
 
 
 async def transcrever_audio(audio_bytes: bytes, nome_arquivo: str = "gravacao.webm") -> str:
-    if chave_groq():
+    servico = servico_de_transcricao()
+    if servico == "openai":
+        return await transcrever_via_openai(audio_bytes, nome_arquivo)
+    if servico == "groq":
         return await transcrever_via_groq(audio_bytes, nome_arquivo)
-    if os.getenv("VERCEL"):
-        raise TranscricaoErro(
-            "Em produção a transcrição usa a Groq. Configure GROQ_API_KEY no Vercel.",
-            503,
-        )
-    return await asyncio.to_thread(transcrever_audio_completo_sync, audio_bytes)
+    if servico == "local":
+        return await asyncio.to_thread(transcrever_audio_completo_sync, audio_bytes)
+    raise TranscricaoErro(
+        "Em produção a transcrição usa a OpenAI. Configure OPENAI_API_KEY na Vercel.",
+        503,
+    )
 
 
 @app.get("/")
@@ -302,11 +343,11 @@ async def health():
     return {
         "status": "ok",
         "mongodb": mongo_status,
-        "transcricao": "groq" if chave_groq() else (
-            "indisponível (sem GROQ_API_KEY)" if os.getenv("VERCEL") else "whisper local"
-        ),
-        "whisper": "pronto" if _whisper is not None else "ainda não carregado",
-        "groq": "configurada" if chave_groq() else "ausente",
+        "transcricao": {
+            "openai": f"openai ({MODELO_TRANSCRICAO_OPENAI})",
+            "groq": f"groq ({GROQ_WHISPER_MODELO}, só fora da Vercel)",
+            "local": "whisper local",
+        }.get(servico_de_transcricao(), "indisponível (sem OPENAI_API_KEY)"),
         # Provedor e modelo da análise, do chat, das peças e da revisão (sem a chave).
         "ia": descricao_da_ia(),
     }
@@ -322,9 +363,6 @@ async def transcrever_audio_completo(audio: UploadFile = File(...)):
         return JSONResponse({"erro": str(exc)}, status_code=exc.status)
     return {"text": texto}
 
-
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "openai/gpt-oss-120b"
 
 PROMPT_REVISAO = """Você está revisando a transcrição de uma entrevista jurídica \
 entre um advogado e seu cliente, gerada por um sistema de reconhecimento de voz.
@@ -350,7 +388,6 @@ Texto a revisar:
 
 class RevisarTextoRequest(BaseModel):
     texto: str
-    groq_api_key: str = ""
 
 
 class CadastroRequest(BaseModel):
@@ -419,48 +456,13 @@ async def revisar_transcricao(payload: RevisarTextoRequest):
     if not payload.texto.strip():
         return {"texto_revisado": payload.texto}
 
-    if nome_do_provedor() != "groq" and not payload.groq_api_key.strip():
-        # Mesmo provedor e modelo da análise (ex.: OpenAI). A transcrição em si continua no Whisper.
-        try:
-            ia = provider_do_servidor()
-            revisado = await asyncio.to_thread(ia.generate, PROMPT_REVISAO, payload.texto, False, False)
-        except LLMError as exc:
-            return {"erro": str(exc)}
-        return {"texto_revisado": revisado.strip() or payload.texto}
-
-    chave = payload.groq_api_key.strip() or os.getenv("GROQ_API_KEY", "")
-    if not chave:
-        return {
-            "erro": (
-                "Nenhuma chave da Groq informada (nem no pedido, "
-                "nem em GROQ_API_KEY no .env do backend)."
-            )
-        }
-
-    headers = {
-        "Authorization": f"Bearer {chave}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": PROMPT_REVISAO},
-            {"role": "user", "content": payload.texto},
-        ],
-        "temperature": 0.0,
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resposta = await client.post(GROQ_API_URL, headers=headers, json=body)
-
-    if resposta.status_code != 200:
-        return {
-            "erro": f"Groq retornou status {resposta.status_code}: {resposta.text}"
-        }
-
-    dados = resposta.json()
-    texto_revisado = dados["choices"][0]["message"]["content"].strip()
-    return {"texto_revisado": texto_revisado}
+    # Sempre o mesmo provedor e modelo da análise (em produção, o GPT da OpenAI).
+    try:
+        ia = provider_do_servidor()
+        revisado = await asyncio.to_thread(ia.generate, PROMPT_REVISAO, payload.texto, False, False)
+    except LLMError as exc:
+        return {"erro": str(exc)}
+    return {"texto_revisado": revisado.strip() or payload.texto}
 
 
 def usuario_publico(documento: dict) -> dict:
@@ -1570,10 +1572,10 @@ async def websocket_transcribe(websocket: WebSocket):
             if not audio_bytes:
                 continue
             try:
-                if chave_groq():
-                    texto = await transcrever_via_groq(audio_bytes, "bloco.webm")
-                else:
+                if servico_de_transcricao() == "local":
                     texto = await asyncio.to_thread(transcrever_bloco, audio_bytes)
+                else:
+                    texto = await transcrever_audio(audio_bytes, "bloco.webm")
             except Exception as exc:  # noqa: BLE001
                 await websocket.send_json(
                     {"type": "error", "message": f"Falha ao transcrever: {exc}"}
