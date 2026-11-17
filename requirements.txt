@@ -9,7 +9,6 @@ bcrypt
 google-auth>=2.62
 python-docx
 pypdf
-fpdf2
 openai
 # Produção (Vercel) transcreve na Groq. faster-whisper puxa torch e estoura o limite de 500 MB:
 # faster-whisper
