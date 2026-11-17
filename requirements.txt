@@ -6,6 +6,8 @@ httpx
 python-dotenv
 motor
 bcrypt
+# Confere o ID token do login com Google (assinatura, validade e destinatário).
+google-auth>=2.62
 python-docx
 pypdf
 openai
