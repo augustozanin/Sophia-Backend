@@ -8,6 +8,7 @@ motor
 bcrypt
 python-docx
 pypdf
+fpdf2
 openai
 # Não instalar no Vercel (estoura os 500 MB com torch):
 # faster-whisper

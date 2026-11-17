@@ -434,11 +434,15 @@ class Servidor(unittest.TestCase):
         self.assertEqual(docx_builder.nome_do_arquivo("Contestação trabalhista"), "minuta-contestacao-trabalhista.docx")
 
     def test_pdf_em_memoria(self):
+        from io import BytesIO
+        from pypdf import PdfReader
         from analise import pdf_builder
-        conteudo = pdf_builder.build_pdf("EXCELENTÍSSIMO\n\nMARINA, [CPF]")
-        self.assertTrue(conteudo.startswith(b"%PDF-1.4"))
-        self.assertIn(b"[CPF]", conteudo)
-        self.assertTrue(conteudo.rstrip().endswith(b"%%EOF"))
+        conteudo = pdf_builder.build_pdf("EXCELENTÍSSIMO\n\nMARINA, [CPF]\nRECLAMAÇÃO TRABALHISTA")
+        self.assertTrue(conteudo.startswith(b"%PDF"))
+        texto = "".join((pagina.extract_text() or "") for pagina in PdfReader(BytesIO(conteudo)).pages)
+        self.assertIn("EXCELENTÍSSIMO", texto)
+        self.assertIn("RECLAMAÇÃO TRABALHISTA", texto)
+        self.assertIn("[CPF]", texto)
         self.assertEqual(pdf_builder.nome_do_pdf("Reclamação trabalhista"), "minuta-reclamacao-trabalhista.pdf")
 
 
