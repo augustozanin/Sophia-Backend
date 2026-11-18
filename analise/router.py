@@ -28,7 +28,7 @@ from .contexto import bloco_dos_documentos, fontes_para_salvar, material_para_an
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
 from .pdf_builder import build_pdf, nome_do_pdf
 from .minuta import texto_da_minuta
-from .llm_providers import LLMError, provider_do_servidor
+from .llm_providers import LLMError, nome_do_provedor, provider_do_servidor
 from .consumo import resumo_do_consumo
 from .mapeador import mensagem_front, modelo_front, para_analise_front, peca_front
 from .modelos_pecas import FASES, GRUPOS, MODELOS, obter_modelo
@@ -39,11 +39,24 @@ from .storage import Armazenamento
 ObterContexto = Callable[[str, str], Awaitable[Optional[Dict[str, Any]]]]
 MarcarAnalisado = Callable[[str, str, int], Awaitable[None]]
 
-# Limite do Groq no plano gratuito: 8 mil tokens por minuto. O contexto do chat e da minuta
-# precisa caber nisso com folga; a análise já resume o relato.
-JANELA_CHAT = 10  # mensagens anteriores enviadas à IA a cada pergunta
 MENSAGENS_NA_REANALISE = 20  # últimas mensagens do advogado consideradas ao atualizar a análise
-LIMITE_RELATO_CHAT = 6_000
+# Relato que vai para a minuta (a análise já resume o relato). Limite pensado no plano gratuito
+# do Groq: 8 mil tokens por minuto.
+LIMITE_RELATO_MINUTA = 6_000
+
+# O que o chat manda à IA a cada pergunta:
+# - janela: quantas mensagens anteriores da conversa;
+# - relato: caracteres do relato do caso;
+# - mensagem: caracteres da mensagem do advogado (o front corta no mesmo tamanho);
+# - resposta_anterior: caracteres de cada mensagem antiga no histórico (na tela ela fica inteira).
+# Com o GPT (produção) a IA vê mais da conversa e do relato. Na Groq, que só roda na máquina para
+# testes, os limites seguem apertados por causa do plano gratuito (8 mil tokens por minuto).
+LIMITES_CHAT = {"janela": 20, "relato": 30_000, "mensagem": 10_000, "resposta_anterior": 6_000}
+LIMITES_CHAT_GROQ = {"janela": 10, "relato": 6_000, "mensagem": 4_000, "resposta_anterior": 1_200}
+
+
+def limites_do_chat() -> Dict[str, int]:
+    return LIMITES_CHAT_GROQ if nome_do_provedor() == "groq" else LIMITES_CHAT
 
 
 class AnaliseIn(BaseModel):
@@ -234,24 +247,26 @@ def criar_router(obter_contexto: ObterContexto,
 
     async def _turno_do_chat(caso_id: str, body: ChatIn):
         """((arm, user_id, mensagem, argumentos do turno), None) ou (None, resposta de erro)."""
-        user_id, mensagem = body.user_id.strip(), body.mensagem.strip()[:4000]
+        limites = limites_do_chat()
+        user_id, mensagem = body.user_id.strip(), body.mensagem.strip()[:limites["mensagem"]]
         arm, ctx, erro = await _preparar(user_id, caso_id)
         if erro:
             return None, erro
         if not mensagem:
             return None, _erro("Digite uma mensagem.", 400)
         ultima = await arm.ultima_analise(user_id, caso_id)
-        relato = texto_dos_relatos(ctx["relatos"], LIMITE_RELATO_CHAT)
+        relato = texto_dos_relatos(ctx["relatos"], limites["relato"])
         if not ultima and not relato:
             return None, _erro("Registre o relato do caso antes de conversar com a IA.", 404)
-        historico = await arm.listar_mensagens(user_id, caso_id, JANELA_CHAT)
+        historico = await arm.listar_mensagens(user_id, caso_id, limites["janela"])
         contexto = {"caso": _resumo_do_caso(ctx), "analise": ultima["analise"] if ultima else None,
                     "relato": relato}
         documentos_bloco, _meta = bloco_dos_documentos(ctx["documentos"])
         argumentos = dict(
             case_context_json=contexto,
             conversation_history=[{"role": m["papel"], "content": m["conteudo"]} for m in historico],
-            new_message=mensagem, documentos_bloco=documentos_bloco, area=_area_do_caso(ctx))
+            new_message=mensagem, documentos_bloco=documentos_bloco, area=_area_do_caso(ctx),
+            limite_resposta_anterior=limites["resposta_anterior"])
         return (arm, user_id, mensagem, argumentos), None
 
     @router.post("/chat/{caso_id}")
@@ -427,7 +442,7 @@ def criar_router(obter_contexto: ObterContexto,
             return _erro("Gere a análise preliminar do caso antes de pedir uma minuta.", 409)
         instrucoes = (body.instrucoes or "").strip()[:2000] or None
         contexto = {"caso": _resumo_do_caso(ctx), "analise": ultima["analise"],
-                    "relato": texto_dos_relatos(ctx["relatos"], LIMITE_RELATO_CHAT)}
+                    "relato": texto_dos_relatos(ctx["relatos"], LIMITE_RELATO_MINUTA)}
         provider = None
         try:
             provider = provider_do_servidor()
