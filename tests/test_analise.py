@@ -1128,5 +1128,65 @@ class StreamDosProvedores(unittest.TestCase):
         self.assertEqual((uso["chamadas"], uso["entrada"], uso["saida"]), (1, 40, 3))
 
 
+class LimitesDoChat(unittest.TestCase):
+    """O que o chat manda à IA: com o GPT, mais conversa e relato; com a Groq, os limites antigos."""
+
+    def setUp(self):
+        from unittest.mock import patch
+
+        self.patch = patch
+        self.arm = Armazenamento(_Banco())
+        relato = "§" * 40_000
+
+        async def obter_contexto(user_id, caso_id):
+            return {"titulo": "Caso", "cliente": "Ana", "area": "civil", "documentos": [],
+                    "relatos": [{"texto": relato, "criado_em": "d1"}]}
+
+        async def marcar(*_):
+            return None
+
+        # 24 mensagens curtas e, por último, uma resposta longa da Sophia.
+        antigas = [("user" if i % 2 == 0 else "assistant", f"msg-{i:02d}") for i in range(24)]
+        rodar(self.arm.adicionar_mensagens("A", "c1", antigas + [("assistant", "ç" * 8_000)]))
+        self.ia = Falso([])
+        self.original = router.provider_do_servidor
+        router.provider_do_servidor = lambda: self.ia
+        app = FastAPI()
+        app.include_router(router.criar_router(obter_contexto, lambda: self.arm, marcar))
+        self.c = TestClient(app)
+
+    def tearDown(self):
+        router.provider_do_servidor = self.original
+
+    def perguntar(self, provedor):
+        self.ia.saidas.append("Resposta.")
+        with self.patch.dict(os.environ, {"SOPHIA_LLM_PROVIDER": provedor}):
+            r = self.c.post("/chat/c1", json={"user_id": "A", "mensagem": "µ" * 12_000})
+        self.assertEqual(r.status_code, 200)
+        prompt = self.ia.prompts[-1]
+        historico = prompt.split("HISTÓRICO:\n", 1)[1].split("\n\nNOVA MENSAGEM", 1)[0].split("\n")
+        return {
+            "janela": len(historico),
+            "relato": prompt.count("§"),
+            "mensagem": prompt.split("NOVA MENSAGEM DO ADVOGADO:\n", 1)[1].count("µ"),
+            "resposta_anterior": historico[-1].count("ç"),
+            "salva": len(r.json()["mensagens"][0]["conteudo"]),
+        }
+
+    def test_com_o_gpt_a_ia_ve_mais_da_conversa_e_do_relato(self):
+        vistos = self.perguntar("openai")
+        self.assertEqual(vistos, {"janela": 20, "relato": 30_000, "mensagem": 10_000,
+                                  "resposta_anterior": 6_000, "salva": 10_000})
+
+    def test_com_a_groq_seguem_os_limites_do_plano_gratuito(self):
+        vistos = self.perguntar("groq")
+        self.assertEqual(vistos, {"janela": 10, "relato": 6_000, "mensagem": 4_000,
+                                  "resposta_anterior": 1_200, "salva": 4_000})
+
+    def test_prompt_do_chat_pede_resposta_completa_quando_o_advogado_pede(self):
+        self.assertIn("responda por inteiro, sem resumir nem encurtar", analysis.CHAT_SYSTEM_SUFFIX)
+        self.assertNotIn("direto e sem jargão", analysis.CHAT_SYSTEM_SUFFIX)
+
+
 if __name__ == "__main__":
     unittest.main()
