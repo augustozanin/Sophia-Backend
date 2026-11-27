@@ -15,14 +15,15 @@ Os SDKs/HTTP de IA são bloqueantes: rodam em thread pool (run_in_threadpool).
 from __future__ import annotations
 
 import json
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi import APIRouter
 from fastapi.concurrency import iterate_in_threadpool, run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from .analysis import run_case_analysis, run_chat_turn, run_chat_turn_stream, run_document_draft
+from .analysis import (MENSAGEM_FORA_DO_CONTEXTO, run_case_analysis, run_chat_turn, run_chat_turn_stream,
+                       run_document_draft)
 from .areas import AREAS, area_front, normalizar_area
 from .contexto import bloco_dos_documentos, fontes_para_salvar, material_para_analise, texto_dos_relatos
 from .docx_builder import DocxIndisponivel, build_docx, nome_do_arquivo
@@ -57,6 +58,29 @@ LIMITES_CHAT_GROQ = {"janela": 10, "relato": 6_000, "mensagem": 4_000, "resposta
 
 def limites_do_chat() -> Dict[str, int]:
     return LIMITES_CHAT_GROQ if nome_do_provedor() == "groq" else LIMITES_CHAT
+
+
+# Começo da resposta fixa do chat a pedido fora do Direito (MENSAGEM_FORA_DO_CONTEXTO).
+INICIO_FORA_DO_CONTEXTO = MENSAGEM_FORA_DO_CONTEXTO.split(".")[0]
+
+
+def mensagens_para_reanalise(mensagens: List[Dict[str, Any]]) -> List[str]:
+    """O que o advogado escreveu no chat, em ordem, para "Atualizar análise com a conversa". Fica de
+    fora a pergunta que o chat recusou por fugir do Direito (a resposta seguinte é a resposta fixa):
+    receita ou código não é fato do caso. Pedido misto continua, porque a resposta trouxe a parte jurídica."""
+    informacoes: List[str] = []
+    for indice, mensagem in enumerate(mensagens):
+        if mensagem["papel"] != "user":
+            continue
+        seguinte = mensagens[indice + 1] if indice + 1 < len(mensagens) else None
+        recusada = (
+            seguinte is not None
+            and seguinte["papel"] == "assistant"
+            and str(seguinte["conteudo"]).strip().lstrip("\"“'").startswith(INICIO_FORA_DO_CONTEXTO)
+        )
+        if not recusada:
+            informacoes.append(mensagem["conteudo"])
+    return informacoes
 
 
 class AnaliseIn(BaseModel):
@@ -172,7 +196,7 @@ def criar_router(obter_contexto: ObterContexto,
         if body.incluir_chat:
             # Só o que o advogado escreveu: respostas da IA não viram fato do caso.
             mensagens = await arm.listar_mensagens(user_id, caso_id)
-            informacoes = [m["conteudo"] for m in mensagens if m["papel"] == "user"][-MENSAGENS_NA_REANALISE:]
+            informacoes = mensagens_para_reanalise(mensagens)[-MENSAGENS_NA_REANALISE:]
             if not informacoes:
                 return _erro("Envie no chat as informações novas antes de atualizar a análise.", 400)
         transcricao, documentos_bloco, documentos_meta = material_para_analise(
